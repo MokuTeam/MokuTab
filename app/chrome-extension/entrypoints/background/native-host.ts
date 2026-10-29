@@ -19,6 +19,7 @@ import { EXTENSION_MODULES } from './modules';
 import { moduleStatesOf, readStoredModulesState } from '@/common/module-state';
 import { BridgeRequests } from './bridge-requests';
 import { createModulePopupHandlers } from './module-popup';
+import { browserSessionId, watchBrowserLifecycle } from './browser-session';
 
 const LOG_PREFIX = '[NativeHost]';
 
@@ -433,8 +434,14 @@ async function connectWebSocket(port: number): Promise<boolean> {
     );
   }
 
+  // Lets the bridge tell tabs of this Chrome session from same-numbered tabs
+  // of an earlier one (see browser-session.ts).
+  const browserSession = await browserSessionId();
+
   return new Promise((resolve) => {
-    const wsUrl = `ws://127.0.0.1:${port}/ws-client?profile=${encodeURIComponent(profileName)}`;
+    const wsUrl =
+      `ws://127.0.0.1:${port}/ws-client?profile=${encodeURIComponent(profileName)}` +
+      `&browser_session=${encodeURIComponent(browserSession)}`;
     console.debug(`${LOG_PREFIX} Connecting WebSocket to ${wsUrl}`);
 
     const ws = new WebSocket(wsUrl);
@@ -740,6 +747,9 @@ export function connectNativeHost(port: number = NATIVE_HOST.DEFAULT_PORT): bool
  * Initialize native host listeners and load initial state
  */
 export const initNativeHostListener = () => {
+  // First, synchronously: onStartup / onInstalled decide the browser session id.
+  watchBrowserLifecycle();
+
   // Initialize server status from storage
   loadServerStatus()
     .then((status) => {
