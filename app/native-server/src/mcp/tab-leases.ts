@@ -11,6 +11,8 @@
  */
 
 import { randomBytes } from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 import { CORE_TOOL_NAMES } from '@mokuhub/mokutab-shared';
 import { installedToolSchemas } from './catalogue';
@@ -22,6 +24,12 @@ export const LEASE_ARG = 'lease';
 /** A lease nobody used for this long is released and its tab closed. */
 export const LEASE_IDLE_MS = 30 * 60 * 1000;
 export const STRICT_TABS_ENV = 'MOKUTAB_STRICT_TABS';
+/** Overrides LEASE_IDLE_MS, in whole minutes (at least 1). */
+export const LEASE_IDLE_ENV = 'MOKUTAB_LEASE_IDLE_MINUTES';
+/** The lease table's file in the bridge state dir. */
+export const LEASES_FILE = 'leases.json';
+/** A saved lease whose profile has not reconnected for this long is forgotten. */
+export const ORPHAN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 const LEASE_PROPERTY = {
   type: 'string',
@@ -53,6 +61,31 @@ export interface TabLease {
    * on expiry and release keeps it unless keep_tab:false is explicit.
    */
   adopted?: boolean;
+  /**
+   * The extension's id for the Chrome session the tab was opened in. Tab ids
+   * start over when Chrome restarts, so a lease saved across a bridge restart
+   * may only close its tab while the profile reports this same id.
+   */
+  browser_session?: string | null;
+}
+
+/** What a saved lease keeps across a bridge restart. */
+export interface SavedLease {
+  lease: string;
+  profile: string;
+  tabId: number;
+  windowId: number | null;
+  created_at: number;
+  adopted: boolean;
+  browser_session: string | null;
+}
+
+/** The idle limit: MOKUTAB_LEASE_IDLE_MINUTES when it is a whole number of minutes >= 1. */
+export function leaseIdleMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = readEnv(LEASE_IDLE_ENV, env);
+  if (raw === undefined) return LEASE_IDLE_MS;
+  const minutes = Number(raw.trim());
+  return Number.isInteger(minutes) && minutes >= 1 ? minutes * 60 * 1000 : LEASE_IDLE_MS;
 }
 
 /** Input properties of every installed tool (core and modules, on or off), built once. */
@@ -100,12 +133,141 @@ export function newLeaseId(): string {
   return `L${randomBytes(4).toString('hex')}`;
 }
 
+function savedLease(lease: TabLease): SavedLease {
+  return {
+    lease: lease.lease,
+    profile: lease.profile,
+    tabId: lease.tabId,
+    windowId: lease.windowId,
+    created_at: lease.created_at,
+    adopted: lease.adopted === true,
+    browser_session: lease.browser_session ?? null,
+  };
+}
+
+function parseSavedLease(raw: any): SavedLease | null {
+  if (!raw || typeof raw.lease !== 'string' || typeof raw.profile !== 'string') return null;
+  if (typeof raw.tabId !== 'number' || typeof raw.created_at !== 'number') return null;
+  return {
+    lease: raw.lease,
+    profile: raw.profile,
+    tabId: raw.tabId,
+    windowId: typeof raw.windowId === 'number' ? raw.windowId : null,
+    created_at: raw.created_at,
+    adopted: raw.adopted === true,
+    browser_session: typeof raw.browser_session === 'string' ? raw.browser_session : null,
+  };
+}
+
+/**
+ * Every lease of every MCP session in this bridge, and the leases a previous
+ * bridge left behind.
+ *
+ * Sessions live in memory, so after a restart none of the saved leases has a
+ * session any more: they are orphans, and their tabs are closed when their
+ * profile reconnects (lease-recovery.ts). The file holds who owns a tab, not
+ * when it was last used, so a call writes nothing; adds and removals do.
+ */
+export class LeaseRegistry {
+  private live = new Set<TabLease>();
+  private orphans: SavedLease[] = [];
+  private file: string | null = null;
+
+  /**
+   * Save leases in `file` and take the ones a previous bridge saved there as
+   * orphans. Only the process that owns the port calls this; tests keep the
+   * registry in memory.
+   */
+  enablePersistence(file: string, now: number = Date.now()): void {
+    this.file = file;
+    let raw: any;
+    try {
+      raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+      return;
+    }
+    if (raw?.version !== 1 || !Array.isArray(raw.leases)) return;
+    for (const entry of raw.leases) {
+      const saved = parseSavedLease(entry);
+      if (saved && now - saved.created_at < ORPHAN_MAX_AGE_MS) this.orphans.push(saved);
+    }
+  }
+
+  add(lease: TabLease): void {
+    this.live.add(lease);
+    this.persist();
+  }
+
+  remove(lease: TabLease): void {
+    if (this.live.delete(lease)) this.persist();
+  }
+
+  /**
+   * A call named `tabId` in `profile` without its lease (a script that leased
+   * once and then passes the tabId, often from another MCP session): count it
+   * as use of whichever lease holds that tab, so the idle sweep spares it.
+   */
+  touchTab(profile: string, tabId: number, now: number): boolean {
+    let touched = false;
+    for (const lease of this.live) {
+      if (lease.profile === profile && lease.tabId === tabId) {
+        lease.last_used = now;
+        touched = true;
+      }
+    }
+    return touched;
+  }
+
+  /** Remove and return the orphans of `profile`. */
+  takeOrphans(profile: string): SavedLease[] {
+    const taken = this.orphans.filter((o) => o.profile === profile);
+    if (taken.length === 0) return taken;
+    this.orphans = this.orphans.filter((o) => o.profile !== profile);
+    this.persist();
+    return taken;
+  }
+
+  get orphanCount(): number {
+    return this.orphans.length;
+  }
+
+  private persist(): void {
+    const file = this.file;
+    if (!file) return;
+    // Orphans whose profile has not reconnected yet stay in the file, so a
+    // second restart before it does still finds them.
+    const data = {
+      version: 1,
+      leases: [...this.orphans, ...[...this.live].map(savedLease)],
+    };
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const tmp = `${file}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(data));
+      try {
+        fs.renameSync(tmp, file);
+      } catch {
+        // Windows: a scanner holding the target makes rename fail; write in place.
+        fs.writeFileSync(file, JSON.stringify(data));
+      }
+    } catch (error: any) {
+      console.error(`[tab-leases] Could not save the lease table: ${error?.message}`);
+    }
+  }
+}
+
+/** The bridge's one lease registry. */
+export const leaseRegistry = new LeaseRegistry();
+
 /** Per-MCP-session lease table. */
 export class LeaseTable {
   private leases = new Map<string, TabLease>();
 
+  constructor(private registry: LeaseRegistry = leaseRegistry) {}
+
   add(lease: TabLease): void {
     this.leases.set(lease.lease, lease);
+    this.registry.add(lease);
   }
 
   get(id: string): TabLease | undefined {
@@ -121,20 +283,36 @@ export class LeaseTable {
   }
 
   delete(id: string): boolean {
-    return this.leases.delete(id);
+    const lease = this.leases.get(id);
+    if (!lease) return false;
+    this.leases.delete(id);
+    this.registry.remove(lease);
+    return true;
+  }
+
+  /** Count a call naming `tabId` as use of whichever lease holds it, in any session. */
+  touchTab(profile: string, tabId: number, now: number): boolean {
+    return this.registry.touchTab(profile, tabId, now);
+  }
+
+  /** Remove and return every lease (the session closed). */
+  takeAll(): TabLease[] {
+    const all = [...this.leases.values()];
+    for (const lease of all) this.delete(lease.lease);
+    return all;
   }
 
   get size(): number {
     return this.leases.size;
   }
 
-  /** Remove and return every lease idle for LEASE_IDLE_MS or longer. */
-  takeExpired(now: number): TabLease[] {
+  /** Remove and return every lease idle for `idleMs` (leaseIdleMs()) or longer. */
+  takeExpired(now: number, idleMs: number = leaseIdleMs()): TabLease[] {
     const expired: TabLease[] = [];
     for (const lease of this.leases.values()) {
-      if (now - lease.last_used >= LEASE_IDLE_MS) expired.push(lease);
+      if (now - lease.last_used >= idleMs) expired.push(lease);
     }
-    for (const lease of expired) this.leases.delete(lease.lease);
+    for (const lease of expired) this.delete(lease.lease);
     return expired;
   }
 

@@ -49,7 +49,7 @@ The 1.x command names stay as aliases of `mokutab-bridge` and `mokutab-stdio` un
 | Wrapper logs | `%LOCALAPPDATA%\mokutab-bridge\logs` (Windows), `~/Library/Logs/mokutab-bridge` (macOS), `$XDG_STATE_HOME/mokutab-bridge/logs` or `~/.local/state/mokutab-bridge/logs` (Linux)                  | none                                                                         |
 | Temp         | `<tmpdir>/mokutab-results`, `<tmpdir>/mokutab-operations`                                                                                                                                       | none                                                                         |
 
-Also read: `MOKUTAB_BW_PATH` (the Bitwarden CLI) and `MOKUTAB_STRICT_TABS=1` (refuse tab-targeting calls without a lease or `tabId`). The first 2.x start moves a 1.x data dir into `~/.mokutab`; `doctor` reports a move that has not happened.
+Also read: `MOKUTAB_BW_PATH` (the Bitwarden CLI) `MOKUTAB_STRICT_TABS=1` (refuse tab-targeting calls without a lease or `tabId`) and `MOKUTAB_LEASE_IDLE_MINUTES` (how long an unused lease lasts, 30 by default). The first 2.x start moves a 1.x data dir into `~/.mokutab`; `doctor` reports a move that has not happened.
 
 ## Development
 

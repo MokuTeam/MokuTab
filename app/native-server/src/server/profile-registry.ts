@@ -42,6 +42,8 @@ export class ProfileRegistry {
   private generation = 0;
   /** Per-profile serial of the current socket; a reconnect gets a higher one. */
   private connectionSerials: Map<string, number> = new Map();
+  /** Per-profile id of the Chrome session its extension runs in (see browser-session.ts there). */
+  private browserSessions: Map<string, string> = new Map();
   private nextSerial = 0;
   /** Requests the extension sends to the bridge (popup -> background -> here), by type. */
   private requestHandlers: Map<string, (payload: any, profileName: string) => unknown> = new Map();
@@ -124,7 +126,7 @@ export class ProfileRegistry {
   /**
    * Register a new profile connection
    */
-  public register(profileName: string, socket: any): void {
+  public register(profileName: string, socket: any, browserSession?: string | null): void {
     // Take the slot before closing the old socket, so a close event that fires
     // synchronously already sees the new socket and leaves the profile alone.
     const existing = this.connections.get(profileName);
@@ -139,6 +141,9 @@ export class ProfileRegistry {
 
     this.nextSerial += 1;
     this.connectionSerials.set(profileName, this.nextSerial);
+    // An extension from before the lease fix sends none: no saved lease matches it.
+    if (browserSession) this.browserSessions.set(profileName, browserSession);
+    else this.browserSessions.delete(profileName);
     this.generation += 1;
     logProfileRegistry(`[ProfileRegistry] Profile "${profileName}" connected.`);
 
@@ -210,6 +215,7 @@ export class ProfileRegistry {
     if (this.connections.has(profileName)) {
       this.connections.delete(profileName);
       this.connectionSerials.delete(profileName);
+      this.browserSessions.delete(profileName);
       this.generation += 1;
       logProfileRegistry(`[ProfileRegistry] Profile "${profileName}" disconnected.`);
 
@@ -260,6 +266,15 @@ export class ProfileRegistry {
    */
   public getConnectionSerial(profileName: string): number | null {
     return this.connectionSerials.get(profileName) ?? null;
+  }
+
+  /**
+   * The id the profile's extension gave for its Chrome session, or null (not
+   * connected, or an extension that sends none). Tab ids are only meaningful
+   * within one Chrome session.
+   */
+  public getBrowserSession(profileName: string): string | null {
+    return this.browserSessions.get(profileName) ?? null;
   }
 
   /**
