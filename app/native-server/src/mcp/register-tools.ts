@@ -52,6 +52,8 @@ import {
   LEASE_ARG,
   LEASE_TAB_TOOL,
   LeaseTable,
+  leaseIdleMs,
+  type LeaseRegistry,
   RELEASE_TAB_TOOL,
   applyLease,
   leaseResult,
@@ -142,6 +144,8 @@ export interface SessionContext {
 interface ToolRouter {
   listTools: () => Promise<{ tools: Tool[] }>;
   handleToolCall: (name: string, args: any, signal?: AbortSignal) => Promise<CallToolResult>;
+  /** The MCP session ended: release its leases, closing the tabs they opened. */
+  close: () => Promise<void>;
 }
 
 export interface ToolRouterOptions {
@@ -149,6 +153,8 @@ export interface ToolRouterOptions {
   modules?: readonly BridgeModule[];
   /** Which modules are on; defaults to the bridge config file. */
   switch?: ModuleSwitchView;
+  /** Where this session's leases are registered; defaults to the bridge's one registry. */
+  leaseRegistry?: LeaseRegistry;
 }
 
 const CANCELLED_TEXT = 'Cancelled by the MCP client; the browser may still finish the action.';
@@ -354,6 +360,13 @@ export const setupTools = (server: Server, options: ToolRouterOptions = {}) => {
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
     router.handleToolCall(request.params.name, request.params.arguments || {}, extra?.signal),
   );
+
+  // A session that ends (DELETE, a dropped SSE stream) releases its leases.
+  const previousOnClose = server.onclose;
+  server.onclose = () => {
+    void router.close();
+    previousOnClose?.();
+  };
 };
 
 export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
@@ -437,7 +450,8 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
 
   // Leases of THIS MCP session. Subagents share the session, so the lease id
   // they pass is what tells their calls apart.
-  const leases = new LeaseTable();
+  const leaseRegistry = options.leaseRegistry;
+  const leases = new LeaseTable(leaseRegistry);
   let sweepTimer: NodeJS.Timeout | null = null;
 
   const closeLeaseTab = async (lease: TabLease): Promise<string | null> => {
@@ -561,6 +575,7 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
       created_at: now,
       last_used: now,
       ...(adopted ? { adopted: true } : {}),
+      browser_session: profileRegistry.getBrowserSession(target),
     };
     if (signal?.aborted) {
       // The caller gave up: nobody will ever pass this lease, and holding it
@@ -582,9 +597,10 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
       note:
         'Pass lease on every browser call. While this session holds a lease, calls that name ' +
         'no tab are refused. Release it with chrome_release_tab when done (idle leases expire ' +
-        'after 30 minutes).' +
+        `after ${Math.round(leaseIdleMs() / 60_000)} minutes, and the tab closes when this ` +
+        'MCP session ends).' +
         (adopted
-          ? ' This tab was adopted, so releasing or expiring the lease leaves it open ' +
+          ? ' This tab was adopted, so releasing or expiring the lease, or the session ending, leaves it open ' +
             '(chrome_release_tab keep_tab:false closes it).'
           : ''),
     });
@@ -852,6 +868,12 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
         leaseProfile = applied.lease.profile;
       }
       const routingProfile = getRoutingProfile(leaseProfile ?? routed.profile);
+      // A tabId without its lease still works the leased tab: keep that lease
+      // (this session's or another's) from expiring under it.
+      if (leaseProfile === null && typeof routed.args.tabId === 'number') {
+        const tabProfile = routingProfile ?? profileRegistry.getActiveProfile();
+        if (tabProfile) leases.touchTab(tabProfile, routed.args.tabId, Date.now());
+      }
 
       // Watches live in the bridge, outside any one session; start reads its tabs
       // in the routed profile.
@@ -1035,5 +1057,15 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
   const handleToolCallWithCancel = (name: string, args: any, signal?: AbortSignal) =>
     raceAbort(handleToolCall(name, args, signal), signal);
 
-  return { listTools, handleToolCall: handleToolCallWithCancel };
+  const close = async (): Promise<void> => {
+    if (sweepTimer) {
+      clearInterval(sweepTimer);
+      sweepTimer = null;
+    }
+    // An adopted tab may be the user's own: forget the lease, keep the tab.
+    const opened = leases.takeAll().filter((lease) => !lease.adopted);
+    await Promise.all(opened.map((lease) => closeLeaseTab(lease)));
+  };
+
+  return { listTools, handleToolCall: handleToolCallWithCancel, close };
 }

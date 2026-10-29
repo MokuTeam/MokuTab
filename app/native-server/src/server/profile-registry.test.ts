@@ -79,6 +79,22 @@ describe('ProfileRegistry active-profile election', () => {
     expect(registry.getConnectedProfiles()).toEqual([]);
   });
 
+  test('remembers the Chrome session each connection reports, until it leaves', () => {
+    const registry = quietRegistry();
+    const socket = new FakeSocket();
+    registry.register('centium', socket, 'chrome-1');
+    expect(registry.getBrowserSession('centium')).toBe('chrome-1');
+
+    // A reconnect from an extension that sends none must not keep the old id.
+    registry.register('centium', new FakeSocket());
+    expect(registry.getBrowserSession('centium')).toBeNull();
+
+    const last = new FakeSocket();
+    registry.register('centium', last, 'chrome-2');
+    last.emit('close');
+    expect(registry.getBrowserSession('centium')).toBeNull();
+  });
+
   test('the generation changes on every connect and disconnect', () => {
     const registry = quietRegistry();
     const first = new FakeSocket();

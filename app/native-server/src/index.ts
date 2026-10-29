@@ -6,6 +6,7 @@ import { startUpdateChecker, updateStateDir } from './update-checker';
 import { profileRegistry } from './server/profile-registry';
 import { watchManager } from './mcp/watch-instance';
 import { installModuleSync } from './server/module-sync';
+import { installLeaseRecovery } from './server/lease-recovery';
 import { wireToolListChanged } from './mcp/mcp-server';
 import { migrateOnStart } from './startup-migration';
 
@@ -27,6 +28,8 @@ try {
   // The module switch: popups read and write it over the extension
   // connection, profiles get it pushed, open MCP sessions get list_changed.
   installModuleSync();
+  // Tabs leased before a restart close when their profile reconnects.
+  installLeaseRecovery();
   wireToolListChanged();
   serverInstance.setNativeHost(nativeMessagingHostInstance); // Server needs setNativeHost method
   nativeMessagingHostInstance.setServer(serverInstance); // NativeHost needs setServer method

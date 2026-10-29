@@ -4,6 +4,23 @@ All notable changes to MokuTab, called WorkatoMCP before 2.0. Versions refer to 
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. Dates are the commit dates of the corresponding release.
 
+## Unreleased
+
+### Fixed
+
+- **Leased tabs stayed open** ([#3](https://github.com/MokuTeam/MokuTab/issues/3)). Agents that never called `chrome_release_tab` left their tabs behind, for three reasons, each fixed:
+  - Leases lived in memory only, so a bridge restart forgot them and nothing ever closed their tabs. The bridge now saves them in its state dir (`leases.json`). After a restart, the tab of each saved lease is closed when its profile reconnects, provided Chrome has not restarted in between: tab ids start over with Chrome, so the extension now sends the bridge an id for its Chrome session on connect, and a lease from another Chrome session is dropped without closing anything. An adopted tab (`adopt_tab_id`) is never closed this way.
+  - An MCP session that ended kept its leases until the 30-minute sweep. Now the end of a session (an HTTP DELETE, a dropped SSE stream) releases them: the tabs they opened close and adopted tabs stay. A client that never ends its session, such as the stdio proxy, still relies on the sweep.
+  - A call that named the leased tab by `tabId` did not count as use, so a script that leased once and then passed the tabId lost its tab to the sweep 30 minutes after leasing, even while working in it. Such a call, from any session, now keeps that lease alive.
+
+### Added
+
+- `MOKUTAB_LEASE_IDLE_MINUTES` sets how long an unused lease lasts (whole minutes, at least 1; 30 by default).
+
+### Changed
+
+- The `chrome_lease_tab` description says a lease also ends with its MCP session and that a call by `tabId` counts as use, so `schema_revision` changes.
+
 ## bridge 2.0.1 · shared 2.0.1 (2026-10-20)
 
 The first GitHub release of MokuTab. Everything that changed since WorkatoMCP 1.13.0 is in the 2.0.0 entry below; coming from 1.x, follow the [upgrade steps](https://github.com/MokuTeam/MokuTab#upgrade-from-workatomcp-1x).

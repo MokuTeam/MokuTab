@@ -116,7 +116,24 @@ describe('server tests', () => {
           on: expect.any(Function),
           send: expect.any(Function),
         }),
+        null,
       );
+    } finally {
+      ws?.close();
+      registerSpy.mockRestore();
+    }
+  });
+
+  test('GET /ws-client passes on the Chrome session id the extension sends', async () => {
+    const registerSpy = jest.spyOn(profileRegistry, 'register').mockImplementation(() => undefined);
+    let ws: { close: () => void } | undefined;
+
+    try {
+      ws = await (Server.getInstance() as any).injectWS(
+        '/ws-client?profile=probe&browser_session=chrome-1',
+      );
+
+      expect(registerSpy).toHaveBeenCalledWith('probe', expect.anything(), 'chrome-1');
     } finally {
       ws?.close();
       registerSpy.mockRestore();

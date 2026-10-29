@@ -22,7 +22,9 @@ import { randomUUID } from 'node:crypto';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { createMcpServer } from '../mcp/mcp-server';
 import { profileRegistry } from './profile-registry';
-import { markMcpActivity } from '../update-checker';
+import * as path from 'node:path';
+import { markMcpActivity, updateStateDir } from '../update-checker';
+import { LEASES_FILE, leaseRegistry } from '../mcp/tab-leases';
 import { watchManager } from '../mcp/watch-instance';
 import { parseWaitQuery } from '../mcp/browser-watch';
 import { isAllowedOrigin, isAllowedWsOrigin, logRefusal, requestRefusal } from './origin-policy';
@@ -189,8 +191,13 @@ export class Server {
           return;
         }
 
-        const profileName = (req.query as any)?.profile || 'default';
-        profileRegistry.register(profileName, socket);
+        const query = (req.query as any) || {};
+        const profileName = query.profile || 'default';
+        const browserSession =
+          typeof query.browser_session === 'string' && query.browser_session.trim() !== ''
+            ? query.browser_session.trim()
+            : null;
+        profileRegistry.register(profileName, socket, browserSession);
       },
     );
   }
@@ -470,6 +477,9 @@ export class Server {
       // Watches (chrome_watch_start) are persisted and resume with the process
       // that owns the port; a host that lost the port race never runs them.
       watchManager.init();
+      // Leases too: a host that lost the port race must not act on the leases
+      // of the bridge that won it.
+      leaseRegistry.enablePersistence(path.join(updateStateDir(), LEASES_FILE));
     } catch (err) {
       this.isRunning = false;
       throw err;
