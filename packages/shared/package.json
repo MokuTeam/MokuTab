@@ -1,6 +1,6 @@
 {
   "name": "@mokuhub/mokutab-shared",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "Tool schemas shared by the MokuTab bridge and Chrome extension",
   "author": "Roman Chikalenko <chikalenkor@gmail.com>",
   "license": "MIT",

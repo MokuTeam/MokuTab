@@ -4,7 +4,7 @@ All notable changes to MokuTab, called WorkatoMCP before 2.0. Versions refer to 
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. Dates are the commit dates of the corresponding release.
 
-## Unreleased
+## bridge 2.1.0 · shared 2.1.0 (2026-11-20)
 
 Changes for clients that run tools from a script (Claude Code's code mode), where a failed script costs a full round trip: one result shape, coded errors, leases that hold across sessions.
 
