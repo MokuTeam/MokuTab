@@ -272,7 +272,7 @@ class WorkatoApiRequestTool extends BaseBrowserToolExecutor {
     } catch (err) {
       if (err instanceof WorkatoDispatchError) {
         return createErrorResponse(
-          `${err.code}: ${err.message}` +
+          `${err.message}` +
             (err.code === 'TabNotFound'
               ? ' Note: an omitted `profile` resolves against the default Chrome profile and ' +
                 'reports TabNotFound for a tab that exists under another profile. Pass tabId ' +

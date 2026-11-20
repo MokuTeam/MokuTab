@@ -221,7 +221,7 @@ class WorkatoRenameRecipeTool extends BaseBrowserToolExecutor {
       };
     } catch (err) {
       if (err instanceof WorkatoDispatchError) {
-        return createErrorResponse(`${err.code}: ${err.message}`);
+        return createErrorResponse(`${err.message}`);
       }
       return createErrorResponse(
         `workato_rename_recipe failed: ${err instanceof Error ? err.message : String(err)}`,

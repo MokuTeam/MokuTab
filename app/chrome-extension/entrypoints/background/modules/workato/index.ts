@@ -4,7 +4,11 @@
  */
 
 // The id and title only: WORKATO_MODULE would bring every Workato schema along.
-import { WORKATO_MODULE_ID, WORKATO_MODULE_TITLE } from '@mokuhub/mokutab-shared';
+import {
+  WORKATO_MODULE_ID,
+  WORKATO_MODULE_TITLE,
+  WORKATO_TAB_SHARED_TOOL_NAMES,
+} from '@mokuhub/mokutab-shared';
 import type { ExtensionModule, ModuleToolExecutor } from '../../extension-module';
 import * as workatoTools from './tools/workato';
 import * as workatoUiTools from './tools/workato-ui';
@@ -28,6 +32,8 @@ const executors = Object.values({
     typeof (value as ModuleToolExecutor).execute === 'function',
 );
 
+const TAB_SHARED = new Set(WORKATO_TAB_SHARED_TOOL_NAMES);
+
 const DESCRIPTION_KEY = 'moduleDescription_workato';
 const DESCRIPTION = 'Recipes, jobs, connections, tables and Workflow App pages in Workato.';
 
@@ -48,4 +54,6 @@ export const workatoExtensionModule: ExtensionModule = {
   // Say which tab/workspace the call actually ran in. Best effort: it never
   // turns a successful call into a failure (see maybeAppendContextBlock).
   afterCall: maybeAppendContextBlock,
+  // The read tools that are only fetches from the page.
+  sharesTab: (name) => TAB_SHARED.has(name),
 };

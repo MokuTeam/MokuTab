@@ -20,6 +20,10 @@ export interface ToolModule {
    * is on.
    */
   aliases?: Readonly<Record<string, string>>;
+  /** Tools that change nothing: served with readOnlyHint. */
+  readOnlyTools?: readonly string[];
+  /** Tools whose whole job is to remove something: served with destructiveHint. */
+  destructiveTools?: readonly string[];
 }
 
 /** Refusal for a call to a tool whose module is switched off. Same wording on both sides. */

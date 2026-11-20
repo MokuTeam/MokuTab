@@ -5,9 +5,16 @@
  * pin (profile + tab) is shared by all of them and cannot tell them apart. The
  * only per-caller identity that survives is what the caller passes, so an agent
  * leases a tab (chrome_lease_tab), gets a token back and passes it on every
- * call. The bridge turns the token into the profile and tabId, and while any
- * lease is held it refuses tab-targeting calls that name no tab at all: under
- * parallel agents "the active tab" is always somebody else's.
+ * call. The bridge turns the token into the profile and tabId, and while a
+ * session holds a lease it refuses that session's tab-targeting calls that
+ * name no tab at all: under parallel agents "the active tab" is always
+ * somebody else's.
+ *
+ * The table is one per bridge, not one per session: several client sessions
+ * share the browser too, so a tab leased in one is off limits to the others
+ * (a call naming it without its lease is refused, and the extension leaves it
+ * out when a call names no tab). The token is the capability: whoever passes
+ * it uses the tab.
  */
 
 import { randomBytes } from 'crypto';
@@ -25,8 +32,8 @@ export const STRICT_TABS_ENV = 'MOKUTAB_STRICT_TABS';
 
 const LEASE_PROPERTY = {
   type: 'string',
-  description:
-    'Lease from chrome_lease_tab: routes this call to the leased tab (and its profile) without activating it. Use it instead of tabId when agents work in parallel.',
+  // Served on every tab tool: the long form lives in chrome_lease_tab.
+  description: 'Lease from chrome_lease_tab: targets its tab and profile. Use instead of tabId.',
 };
 
 /** Tools that never target a tab, or that manage targeting themselves. */
@@ -45,6 +52,8 @@ export interface TabLease {
   profile: string;
   tabId: number;
   windowId: number | null;
+  /** The MCP session that took the lease. */
+  owner: string;
   created_at: number;
   last_used: number;
   /**
@@ -96,11 +105,12 @@ export function withLeaseToolSchemas(tools: Tool[]): Tool[] {
   });
 }
 
+/** The token is the capability to use the tab, from any session: 64 random bits. */
 export function newLeaseId(): string {
-  return `L${randomBytes(4).toString('hex')}`;
+  return `L${randomBytes(8).toString('hex')}`;
 }
 
-/** Per-MCP-session lease table. */
+/** The leases of one bridge, each owned by the MCP session that took it. */
 export class LeaseTable {
   private leases = new Map<string, TabLease>();
 
@@ -112,7 +122,7 @@ export class LeaseTable {
     return this.leases.get(id);
   }
 
-  /** The lease of this session that already holds `tabId` in `profile`, if any. */
+  /** The lease that holds `tabId` in `profile`, whoever owns it. */
   findByTab(profile: string, tabId: number): TabLease | undefined {
     for (const lease of this.leases.values()) {
       if (lease.profile === profile && lease.tabId === tabId) return lease;
@@ -128,6 +138,18 @@ export class LeaseTable {
     return this.leases.size;
   }
 
+  /** How many leases `owner` holds: what switches that session to strict targeting. */
+  ownedBy(owner: string): number {
+    let count = 0;
+    for (const lease of this.leases.values()) if (lease.owner === owner) count++;
+    return count;
+  }
+
+  /** Forget every lease (tests). */
+  clear(): void {
+    this.leases.clear();
+  }
+
   /** Remove and return every lease idle for LEASE_IDLE_MS or longer. */
   takeExpired(now: number): TabLease[] {
     const expired: TabLease[] = [];
@@ -138,9 +160,13 @@ export class LeaseTable {
     return expired;
   }
 
-  summary(now: number) {
+  /**
+   * Every lease as `owner` may see it: its own with the token, another
+   * session's without (the tab to stay away from, not a tab to use).
+   */
+  summary(now: number, owner: string) {
     return [...this.leases.values()].map((l) => ({
-      lease: l.lease,
+      ...(l.owner === owner ? { lease: l.lease } : { other_session: true }),
       profile: l.profile,
       tabId: l.tabId,
       windowId: l.windowId,
@@ -149,16 +175,38 @@ export class LeaseTable {
     }));
   }
 
-  /** Every leased tab of this session in `profile`. */
+  /** Every leased tab in `profile`, whoever owns the lease. */
   tabIdsIn(profile: string): Set<number> {
     const ids = new Set<number>();
     for (const lease of this.leases.values()) if (lease.profile === profile) ids.add(lease.tabId);
     return ids;
   }
 
-  ids(): string[] {
-    return [...this.leases.keys()];
+  /** The lease tokens of `owner`. */
+  ids(owner: string): string[] {
+    return [...this.leases.values()].filter((l) => l.owner === owner).map((l) => l.lease);
   }
+}
+
+/** The one lease table of this bridge process. */
+export const bridgeLeases = new LeaseTable();
+
+/**
+ * A tool call carries the tabs leased in its profile (when there are any), so
+ * the extension leaves them out when the call names no tab: "the first
+ * Workato tab" must never be a tab some agent leased. The extension keeps the
+ * list of the latest call, so EVERY tool call to a profile goes through here:
+ * one that left it out would read as "no leases".
+ */
+export function withLeasedTabs<T extends object>(payload: T, profile: string): T {
+  if (bridgeLeases.size === 0) return payload;
+  const leasedTabs = [...bridgeLeases.tabIdsIn(profile)];
+  return leasedTabs.length > 0 ? { ...payload, leasedTabs } : payload;
+}
+
+/** An id for one MCP session, to mark the leases it takes. */
+export function newSessionKey(): string {
+  return `S${randomBytes(6).toString('hex')}`;
 }
 
 export type LeaseApplication =
@@ -175,6 +223,7 @@ export function applyLease(
   args: Record<string, any>,
   table: LeaseTable,
   now: number,
+  owner: string,
 ): LeaseApplication {
   const id = args[LEASE_ARG];
   if (typeof id !== 'string' || id.trim() === '') {
@@ -185,7 +234,7 @@ export function applyLease(
     return {
       ok: false,
       error:
-        `Unknown or expired lease "${id}". Leases of this session: ${JSON.stringify(table.ids())}. ` +
+        `UnknownLease: no lease "${id}" (unknown or expired). Leases of this session: ${JSON.stringify(table.ids(owner))}. ` +
         'Take a new one with chrome_lease_tab.',
     };
   }

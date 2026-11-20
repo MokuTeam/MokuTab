@@ -20,6 +20,9 @@ export {
   WORKATO_TOOL_SCHEMAS,
   WORKATO_INSTRUCTIONS,
   WORKATO_TOOL_ALIASES,
+  WORKATO_DESTRUCTIVE_TOOL_NAMES,
+  WORKATO_READ_ONLY_TOOL_NAMES,
+  WORKATO_TAB_SHARED_TOOL_NAMES,
 } from './workato';
 
 /** Every installed module, in listing order. */

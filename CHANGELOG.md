@@ -4,6 +4,32 @@ All notable changes to MokuTab, called WorkatoMCP before 2.0. Versions refer to 
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. Dates are the commit dates of the corresponding release.
 
+## Unreleased
+
+Changes for clients that run tools from a script (Claude Code's code mode), where a failed script costs a full round trip: one result shape, coded errors, leases that hold across sessions.
+
+### Changed
+
+- **One JSON object per result.** Every result that carries JSON now leaves the bridge as one text block holding one object. A headline that used to sit on its own line ahead of the JSON is the `headline` key, a top-level array is under `items`, and the Workato context block is the `context` key of the same object instead of a second block. Text-only results (a snapshot, page text) and image results are unchanged. Before this, a script got an object from some tools, a string of two JSON lines from others, and the payload as a string inside a note from the rest. A client that read the FIRST text block and parsed a last JSON line needs to read the object instead. `workato_lookup_tables_list` now answers `{headline, items}` where it answered a bare array.
+- **Failures are `{"error": {"code", "message"}}`.** The code is the name the refusal starts with (`TabNotFound`, `StrictTabs`, `ContextChanged`, `VersionConflict`, `WorkatoApiError` and so on), `ToolError` when it names none. Fields a failure came with stay beside `error`; a response body that followed the message is under `details`. The Workato dispatch codes now reach the caller from every Workato tool: they used to survive only where a handler printed them itself.
+- **New codes for router failures:** `UnknownLease`, `ProfileNotConnected`, `CallTimeout`, `ProfileCallFailed`, `CallCancelled`, `TabLeased`.
+- **A spilled result is a JSON file.** `auto_file` and `out_file` write the same object the call would have returned inline (without `context`), so the file parses as it is. A result of the headline-then-JSON form used to be written as a `.txt` that did not parse.
+- **Leases are per bridge, not per MCP session.** A tab leased in one client session is refused to the others (`TabLeased`) when they name it, pin to it, adopt it, close it or start a watch on it, and a Workato call that names no tab no longer picks it. `chrome_list_profiles` lists other sessions' leased tabs without their tokens. A lease token works from any session.
+- **Read-only Workato calls overlap on a tab.** The per-tab queue kept every call with a `tabId` strictly one at a time. Calls that only fetch from the page now run side by side and still take turns with calls that drive the page. Six parallel `workato_search_recipes` on one tab took 4.5 s before and 2.7 s after; the rest is Workato answering one session's requests mostly in sequence.
+- **Shorter shared parameter descriptions.** `profile`, `lease`, `out_file`, `auto_file` and `auto_file_threshold_chars` are served on up to 150 tools each; their descriptions are now one short line. The served input schemas went from 216,412 to 195,745 characters.
+- **Server instructions** say that JSON results are one object and that a large one is named in `saved_to`.
+- **Lease tokens are 64 bits** (`L` and 16 hex digits, 8 before): a token now works from any session.
+
+### Added
+
+- **MCP tool annotations.** Every tool is served with `readOnlyHint`; the 46 tools that change nothing also carry `idempotentHint`, and the 10 that only remove something carry `destructiveHint`. Claude Code runs read-only calls in parallel with each other.
+- `CORE_READ_ONLY_TOOL_NAMES`, `CORE_DESTRUCTIVE_TOOL_NAMES`, `WORKATO_READ_ONLY_TOOL_NAMES`, `WORKATO_DESTRUCTIVE_TOOL_NAMES` and `WORKATO_TAB_SHARED_TOOL_NAMES` in `@mokuhub/mokutab-shared`.
+- Return shapes in the descriptions of `get_windows_and_tabs`, `chrome_list_profiles`, `workato_list_jobs`, `workato_list_folders`, `workato_lcap_apps_list`, `workato_lookup_tables_list` and `workato_data_tables_list`, each checked against a live call.
+
+### Fixed
+
+- `workato_data_tables_list` was described as returning an array; it returns `{tables, page, per_page, count, folder_id}`.
+
 ## bridge 2.0.1 · shared 2.0.1 (2026-10-20)
 
 The first GitHub release of MokuTab. Everything that changed since WorkatoMCP 1.13.0 is in the 2.0.0 entry below; coming from 1.x, follow the [upgrade steps](https://github.com/MokuTeam/MokuTab#upgrade-from-workatomcp-1x).

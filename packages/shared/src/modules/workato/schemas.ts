@@ -1372,7 +1372,8 @@ export const WORKATO_TOOL_SCHEMAS: Tool[] = [
       "project's id. Each node reports flow_count/active_flow_count (recipes) plus non-zero asset " +
       'counts under `counts`, and nested `children`. Slim by default; totals holds account-wide ' +
       'asset counters. THE tool to call before creating/moving folders or recipes: it is the ' +
-      'source of folder ids. Read-only. Requires an open Workato tab.',
+      'source of folder ids. Returns {project_count, projects}. Read-only. Requires an open ' +
+      'Workato tab.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2078,7 +2079,8 @@ export const WORKATO_TOOL_SCHEMAS: Tool[] = [
       'walk stops after 3 consecutive erased jobs because that boundary is workspace-wide and ' +
       'everything older is erased too (stop_on_erased:false to keep going). Report columns come ' +
       'back with their configured labels, all of them, plus report_columns. `fields` projects the ' +
-      'slim job. Requires an open Workato tab.',
+      'slim job. Returns {total, succeeded, failed, jobs, coverage, next_cursor, ' +
+      'report_columns}. Requires an open Workato tab.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3640,7 +3642,7 @@ export const WORKATO_TOOL_SCHEMAS: Tool[] = [
     name: WORKATO_TOOL_NAMES.WORKATO_LOOKUP.TABLES_LIST,
     description:
       'List all Workato lookup tables visible to the signed-in user (GET /lookup_tables.json). ' +
-      'Returns a slim shape: [{id, name, entry_count, updated_at}]. ' +
+      'Returns {headline, items: [{id, name, entry_count, updated_at}]}. ' +
       'Requires an open logged-in Workato tab (uses the session pinned tab or first Workato app tab, never whatever tab is focused).',
     inputSchema: {
       type: 'object',
@@ -3984,7 +3986,7 @@ export const WORKATO_TOOL_SCHEMAS: Tool[] = [
     description:
       'List Workato Data Tables in a project folder (GET /web_api/mixed_assets.json filtered to data-table assets). ' +
       'Data Tables are the newer relational store (distinct from the older Lookup Tables at /lookup_tables/). ' +
-      'Returns a slim shape: [{id, name, folder_id, total_entries_count, updated_at}]. ' +
+      'Returns {tables: [{id, name, folder_id, total_entries_count, updated_at}], page, per_page, count, folder_id}. ' +
       'If folder_id is omitted, the tool falls back to the folder visible in the current Workato URL (best-effort). ' +
       'Prerequisite: the active tab must be a logged-in Workato page.',
     inputSchema: {
@@ -4551,8 +4553,8 @@ export const WORKATO_TOOL_SCHEMAS: Tool[] = [
   {
     name: WORKATO_TOOL_NAMES.WORKATO_LCAP.APPS_LIST,
     description:
-      'List the Workflow Apps (LCAP) in the current workspace: id, name, project_id, unique_id, ' +
-      'live. Read-only. There is no endpoint that lists the PAGES in an app - page ids come from ' +
+      'List the Workflow Apps (LCAP) in the current workspace. Returns {app_count, apps: [{id, ' +
+      'name, project_id, unique_id, live}]}. Read-only. There is no endpoint that lists the PAGES in an app - page ids come from ' +
       "the builder URL (app.workato.com/lcap/pages/<id>) or the project's asset view. Requires " +
       'an open Workato tab in the right workspace.',
     inputSchema: {

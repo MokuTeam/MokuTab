@@ -4,7 +4,8 @@ import { moduleOffMessage } from '@mokuhub/mokutab-shared';
 import * as browserTools from './browser';
 import { EXTENSION_MODULES } from '../modules';
 import { moduleEnabled, type ExtensionModule } from '../extension-module';
-import { runExclusiveForTab } from './tab-queue';
+import { runExclusiveForTab, runSharedForTab } from './tab-queue';
+import { setLeasedTabs } from '../leased-tabs';
 
 const toolsMap = new Map<string, any>(
   Object.values(browserTools as Record<string, any>).map((tool: any) => [tool.name, tool]),
@@ -24,12 +25,15 @@ for (const module of EXTENSION_MODULES) {
 export interface ToolCallParam {
   name: string;
   args: any;
+  /** Tabs leased by agents in this profile; the bridge sends it when there are any. */
+  leasedTabs?: number[];
 }
 
 /**
  * Handle tool execution
  */
 export const handleCallTool = async (param: ToolCallParam) => {
+  setLeasedTabs(param.leasedTabs);
   const tool = toolsMap.get(param.name);
   if (!tool) {
     return createErrorResponse(`Tool ${param.name} not found`);
@@ -44,7 +48,9 @@ export const handleCallTool = async (param: ToolCallParam) => {
   // chrome_handle_dialog answers the dialog another call on this tab is blocked
   // on; queueing it behind that call would deadlock the tab.
   if (typeof tabId === 'number' && param.name !== 'chrome_handle_dialog') {
-    return runExclusiveForTab(tabId, () => executeTool(tool, param, owner));
+    // A module's fetch-only reads overlap on the tab; everything else takes it alone.
+    const queue = owner?.sharesTab?.(param.name) ? runSharedForTab : runExclusiveForTab;
+    return queue(tabId, () => executeTool(tool, param, owner));
   }
   return executeTool(tool, param, owner);
 };

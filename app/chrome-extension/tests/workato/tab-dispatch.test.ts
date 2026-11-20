@@ -6,11 +6,14 @@ import {
   WorkatoDispatchError,
 } from '../../entrypoints/background/modules/workato/tools/workato/tab-dispatch';
 
+import { setLeasedTabs } from '../../entrypoints/background/leased-tabs';
+
 type Tab = chrome.tabs.Tab;
 const mockTabs: Tab[] = [];
 
 beforeEach(() => {
   mockTabs.length = 0;
+  setLeasedTabs(undefined);
   (globalThis as unknown as { chrome: unknown }).chrome = {
     tabs: {
       query: vi.fn(async (info: { windowId?: number } = {}) =>
@@ -28,6 +31,49 @@ beforeEach(() => {
 function tab(id: number, url: string, windowId = 1): Tab {
   return { id, url, windowId } as Tab;
 }
+
+describe('findWorkatoTab and leased tabs', () => {
+  it('a call that names no tab never picks a tab an agent leased', async () => {
+    mockTabs.push(tab(1, 'https://app.workato.com/recipes/1'));
+    mockTabs.push(tab(2, 'https://app.workato.com/recipes/2'));
+    setLeasedTabs([1]);
+
+    expect((await findWorkatoTab()).tabId).toBe(2);
+    // Naming the tab is the bridge's to allow: here it resolves as before.
+    expect((await findWorkatoTab(1)).tabId).toBe(1);
+  });
+
+  it('says TabLeased, not TabNotFound, when every Workato tab is leased', async () => {
+    mockTabs.push(tab(1, 'https://app.workato.com/recipes/1'));
+    setLeasedTabs([1]);
+
+    await expect(findWorkatoTab()).rejects.toMatchObject({ code: 'TabLeased' });
+  });
+
+  it('skips a leased tab inside a named window too', async () => {
+    mockTabs.push(tab(1, 'https://app.workato.com/recipes/1', 20));
+    mockTabs.push(tab(2, 'https://app.workato.com/recipes/2', 20));
+    setLeasedTabs([1]);
+
+    expect((await findWorkatoTab(undefined, { windowId: 20 })).tabId).toBe(2);
+  });
+
+  it('a leased tab on another host does not trip the two-hosts guard', async () => {
+    mockTabs.push(tab(1, 'https://app.workato.com/recipes/1'));
+    mockTabs.push(tab(2, 'https://app.eu.workato.com/recipes/2'));
+    setLeasedTabs([2]);
+
+    expect((await findWorkatoTab()).tabId).toBe(1);
+  });
+
+  it('the list is replaced by each call: an absent list means no leases', async () => {
+    mockTabs.push(tab(1, 'https://app.workato.com/recipes/1'));
+    setLeasedTabs([1]);
+    setLeasedTabs(undefined);
+
+    expect((await findWorkatoTab()).tabId).toBe(1);
+  });
+});
 
 describe('findWorkatoTab windowId', () => {
   it('is ignored when an explicit tabId is given', async () => {

@@ -10,7 +10,13 @@
  *   3. If zero matches  -> TabNotFound.
  *   4. If matches span >1 distinct host -> MultipleWorkatoHosts.
  *   5. Otherwise pick tabs[0].
+ *
+ * A call that names no tab never picks a tab an agent leased (leased-tabs.ts):
+ * those are left out before steps 3 to 5, and when nothing else is open the
+ * answer is TabLeased, not somebody's tab.
  */
+
+import { isLeasedTab } from '../../../../leased-tabs';
 
 export const WORKATO_URL_PATTERNS = ['*://*.workato.com/*', '*://*.workato.is/*'];
 
@@ -49,6 +55,8 @@ export class WorkatoDispatchError extends Error {
   constructor(
     public code:
       | 'TabNotFound'
+      | 'TabLeased'
+      | 'ProjectNotFound'
       | 'MultipleWorkatoHosts'
       | 'ScriptExecutionFailed'
       | 'UnexpectedShape'
@@ -56,7 +64,9 @@ export class WorkatoDispatchError extends Error {
     message: string,
     public details?: Record<string, unknown>,
   ) {
-    super(message);
+    // The code leads the message, so it survives every `X failed: ${err.message}`
+    // on the way out and reaches the caller as error.code.
+    super(`${code}: ${message}`);
     this.name = 'WorkatoDispatchError';
   }
 }
@@ -159,7 +169,7 @@ export async function findWorkatoTab(
     });
     const match = windowTabs
       .filter(isScriptableTab)
-      .find((t) => isWorkatoAppHost(new URL(t.url).host));
+      .find((t) => isWorkatoAppHost(new URL(t.url).host) && !isLeasedTab(t.id));
     if (!match) {
       throw new WorkatoDispatchError(
         'TabNotFound',
@@ -193,7 +203,17 @@ export async function findWorkatoTab(
     );
   }
 
-  const appTabs = usable.filter((t) => isWorkatoAppHost(new URL(t.url).host));
+  const allAppTabs = usable.filter((t) => isWorkatoAppHost(new URL(t.url).host));
+  const appTabs = allAppTabs.filter((t) => !isLeasedTab(t.id));
+
+  if (allAppTabs.length > 0 && appTabs.length === 0) {
+    throw new WorkatoDispatchError(
+      'TabLeased',
+      'Every Workato tab in this Chrome profile is leased by an agent, and this call names no ' +
+        'tab. Take a tab of your own with chrome_lease_tab (url: the Workato app), or open ' +
+        'Workato in another tab.',
+    );
+  }
 
   if (appTabs.length === 0) {
     const seenHosts = [...new Set(usable.map((t) => new URL(t.url).host))];

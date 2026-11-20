@@ -1,5 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { busyTabs, runExclusiveForTab } from '@/entrypoints/background/tools/tab-queue';
+import {
+  busyTabs,
+  runExclusiveForTab,
+  runSharedForTab,
+} from '@/entrypoints/background/tools/tab-queue';
 import {
   __resetUidStoreForTest,
   assignUid,
@@ -66,6 +70,82 @@ describe('runExclusiveForTab hold bound', () => {
     await expect(next).resolves.toBe('next ran');
     releaseStuck('stuck finished');
     await expect(stuck).resolves.toBe('stuck finished');
+  });
+});
+
+describe('runSharedForTab', () => {
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+
+  it('lets fetch-only calls overlap, behind the driving call ahead of them and ahead of the next one', async () => {
+    const order: string[] = [];
+    const drive = deferred();
+    const readA = deferred();
+    const readB = deferred();
+    const first = runExclusiveForTab(31, async () => {
+      order.push('drive:start');
+      await drive.promise;
+      order.push('drive:end');
+    });
+    const a = runSharedForTab(31, async () => {
+      order.push('a:start');
+      await readA.promise;
+      order.push('a:end');
+    });
+    const b = runSharedForTab(31, async () => {
+      order.push('b:start');
+      await readB.promise;
+      order.push('b:end');
+    });
+    const last = runExclusiveForTab(31, async () => {
+      order.push('last');
+    });
+
+    await tick();
+    expect(order).toEqual(['drive:start']);
+    drive.resolve();
+    await first;
+    await tick();
+    // Both reads are in the page at once.
+    expect(order).toEqual(['drive:start', 'drive:end', 'a:start', 'b:start']);
+    readB.resolve();
+    await b;
+    await tick();
+    // The next driving call waits for the read still running.
+    expect(order).not.toContain('last');
+    readA.resolve();
+    await Promise.all([a, last]);
+    expect(order.slice(4)).toEqual(['b:end', 'a:end', 'last']);
+    await tick();
+    expect(busyTabs()).not.toContain(31);
+  });
+
+  it('a read that arrives behind a queued driving call waits for it, not for earlier reads', async () => {
+    const order: string[] = [];
+    const slowRead = deferred();
+    const early = runSharedForTab(32, async () => {
+      await slowRead.promise;
+      order.push('early read');
+    });
+    const drive = runExclusiveForTab(32, async () => {
+      order.push('drive');
+    });
+    const late = runSharedForTab(32, async () => {
+      order.push('late read');
+    });
+    await tick();
+    expect(order).toEqual([]);
+    slowRead.resolve();
+    await Promise.all([early, drive, late]);
+    expect(order).toEqual(['early read', 'drive', 'late read']);
+  });
+
+  it('a failed read does not hold the tab', async () => {
+    const failed = runSharedForTab(33, async () => {
+      throw new Error('fetch failed');
+    });
+    const next = runExclusiveForTab(33, async () => 'ok');
+    await expect(failed).rejects.toThrow('fetch failed');
+    await expect(next).resolves.toBe('ok');
   });
 });
 

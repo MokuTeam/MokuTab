@@ -77,13 +77,46 @@ export const CORE_TOOL_NAMES = {
   },
 };
 
+/**
+ * Core tools that change nothing: not the page, not the browser, not the
+ * bridge's own state. Served with readOnlyHint, which lets a client run them
+ * side by side and repeat one after a dropped connection. A tool that can
+ * navigate (chrome_get_web_content with url), move a tab (chrome_screenshot),
+ * consume a buffer (chrome_console) or run caller code is not on the list.
+ */
+export const CORE_READ_ONLY_TOOL_NAMES: readonly string[] = [
+  'get_windows_and_tabs',
+  'chrome_list_profiles',
+  'chrome_bridge_info',
+  'chrome_history',
+  'chrome_bookmark_search',
+  'chrome_snapshot',
+  'chrome_snapshot_wait_for',
+  'chrome_read_page',
+  'chrome_search_page',
+  'chrome_find_elements',
+  'chrome_watch_list',
+  'chrome_watch_events',
+  'chrome_fn_list',
+  'chrome_fn_get',
+  'chrome_fn_runs',
+  'performance_analyze_insight',
+];
+
+/** Core tools whose whole job is to remove something. Served with destructiveHint. */
+export const CORE_DESTRUCTIVE_TOOL_NAMES: readonly string[] = [
+  'chrome_close_tabs',
+  'chrome_bookmark_delete',
+];
+
 export const CORE_TOOL_SCHEMAS: Tool[] = [
   {
     name: CORE_TOOL_NAMES.BROWSER.GET_WINDOWS_AND_TABS,
     description:
       'Get all currently open browser windows and tabs. Pass filter to return only tabs whose ' +
-      'URL or title contains the substring (e.g. filter:"workato") — strongly preferred when ' +
-      'looking for a specific app tab, so unrelated personal tabs never enter the context.',
+      'URL or title contains the substring (e.g. filter:"workato"): strongly preferred when ' +
+      'looking for a specific app tab, so unrelated personal tabs never enter the context. ' +
+      'Returns {windowCount, tabCount, windows: [{windowId, tabs: [{tabId, url, title, active}]}]}.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -595,7 +628,7 @@ export const CORE_TOOL_SCHEMAS: Tool[] = [
   {
     name: CORE_TOOL_NAMES.BROWSER.LEASE_TAB,
     description:
-      'Get a tab of your own for parallel work: several agents sharing one MCP server and one Chrome profile must each lease a tab and pass the returned `lease` on every browser call, instead of relying on the active tab. Opens the tab in a separate, unfocused agents window. Screenshots that need a visible tab move a hidden agents-window tab to a window of its own by themselves; own_window:true (that window up front) is still the choice for chrome_computer mouse/keyboard input, which a hidden tab drops. The bridge turns `lease` into the right profile and tabId, never activates or focuses the tab, and while this MCP session holds any lease it REFUSES tab-targeting calls that carry neither `lease` nor tabId. Calls on the same tab run one at a time. Leases end with chrome_release_tab, when the tab is closed, or after 30 minutes unused. Returns {lease, tabId, windowId, profile}.',
+      'Get a tab of your own for parallel work: several agents sharing one Chrome profile (in one MCP session or in several) must each lease a tab and pass the returned `lease` on every browser call, instead of relying on the active tab. Opens the tab in a separate, unfocused agents window. Screenshots that need a visible tab move a hidden agents-window tab to a window of its own by themselves; own_window:true (that window up front) is still the choice for chrome_computer mouse/keyboard input, which a hidden tab drops. The bridge turns `lease` into the right profile and tabId, never activates or focuses the tab, and while this MCP session holds any lease it REFUSES tab-targeting calls that carry neither `lease` nor tabId. A leased tab is off limits to every other MCP session of this bridge: a call that names it without the lease is refused (TabLeased), and a Workato call that names no tab never picks it. Whoever passes the lease uses the tab. Calls that drive a page run one at a time per tab; read-only Workato calls overlap. Leases end with chrome_release_tab, when the tab is closed, or after 30 minutes unused. Returns {lease, tabId, windowId, profile}.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1986,7 +2019,11 @@ export const CORE_TOOL_SCHEMAS: Tool[] = [
       'List all currently active/connected Chrome profiles (e.g. "prod", "staging", "dev") ' +
       'and see which one is selected for this MCP session, if any. Also returns session_context: ' +
       'the profile, tab, host, workspace and environment this session is pinned to (null when ' +
-      'nothing is pinned, in which case calls follow the bridge default profile).',
+      'nothing is pinned, in which case calls follow the bridge default profile). Returns ' +
+      '{active_profile, session_profile, session_tab_id, session_context, ' +
+      'server_default_profile, connected_profiles, leases, routing_note}. leases holds this ' +
+      "session's leases with their token, and the tabs other sessions leased without one " +
+      '(other_session: true): tabs to stay away from.',
     inputSchema: {
       type: 'object',
       properties: {},

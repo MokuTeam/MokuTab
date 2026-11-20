@@ -25,6 +25,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
+import { foldTexts } from './tool-result';
 
 export const SCREENSHOT_TOOL = 'chrome_screenshot';
 export const JAVASCRIPT_TOOL = 'chrome_javascript';
@@ -132,18 +133,18 @@ export interface PreparedAutoFileCall {
 const OUT_FILE_PROPERTY = {
   type: 'string',
   description:
-    'Absolute path to write the full result to (its directory must exist). The response becomes a compact summary: saved_to, bytes, top-level keys and item counts.',
+    'Absolute path for the full result (the directory must exist). The reply becomes a summary: saved_to, bytes, keys, item counts.',
 };
 
 const AUTO_FILE_PROPERTY = {
   type: 'boolean',
   description:
-    'Spill an oversized result to a temp file and return the same summary instead of the full payload. Default: true for read tools, false for chrome_screenshot. Set false to always get the result inline.',
+    'false: always inline. true: a large result goes to a temp file and the reply is its summary (saved_to). Default true, chrome_screenshot false.',
 };
 
 const AUTO_FILE_THRESHOLD_PROPERTY = {
   type: 'number',
-  description: `Character count above which auto_file spills the result to a file (default: ${DEFAULT_AUTO_FILE_THRESHOLD_CHARS}).`,
+  description: `auto_file threshold in characters (default ${DEFAULT_AUTO_FILE_THRESHOLD_CHARS}).`,
 };
 
 /**
@@ -611,15 +612,12 @@ function writeTextResult(
   texts: TextBlock[],
 ): CallToolResult {
   if (texts.length === 0) return result;
-  const text = texts.map((block) => block.text).join('\n');
+  // The file holds what the call would have returned inline: the same single
+  // JSON object (minus the context), so it parses as it is. Text stays text.
+  const folded = foldTexts(texts.map((block) => block.text));
+  const isJson = folded !== null;
+  const text = folded ?? texts.map((block) => block.text).join('\n');
   const payload = parseResultPayload(text);
-  let isJson = false;
-  try {
-    JSON.parse(text.trim());
-    isJson = true;
-  } catch {
-    isJson = false;
-  }
 
   const target = plan.outFile ?? autoFilePath(plan, isJson ? '.json' : '.txt');
   writeAtomic(target, text);

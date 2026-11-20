@@ -163,9 +163,10 @@ describe('register-tools profile routing', () => {
     const result = await router.handleToolCall('workato_recipe_status', { recipe_id: 1 });
 
     expect(result.isError).toBe(true);
-    const text = (result.content?.[0] as any).text;
-    expect(text).toContain('pinned profile "centium"');
-    expect(text).toContain('bluBanyan');
+    const error = JSON.parse((result.content?.[0] as any).text).error;
+    expect(error.code).toBe('ProfileCallFailed');
+    expect(error.message).toContain('pinned profile "centium"');
+    expect(error.message).toContain('bluBanyan');
     expect(nativeHost).not.toHaveBeenCalled();
   });
 
@@ -181,11 +182,13 @@ describe('register-tools profile routing', () => {
     const result = await router.handleToolCall('workato_recipe_status', { recipe_id: 1 });
 
     expect(result.isError).toBe(true);
-    expect((result.content?.[0] as any).text).toContain('bridge default profile "centium"');
+    expect(JSON.parse((result.content?.[0] as any).text).error.message).toContain(
+      'bridge default profile "centium"',
+    );
     expect(nativeHost).not.toHaveBeenCalled();
   });
 
-  test('stamps the routed profile into the extension context block', async () => {
+  test('folds the extension context block, stamped with the routed profile, into the result', async () => {
     jest.spyOn(profileRegistry, 'getConnectedProfiles').mockReturnValue(['centium']);
     jest.spyOn(profileRegistry, 'sendRequest').mockResolvedValue({
       status: 'success',
@@ -205,16 +208,18 @@ describe('register-tools profile routing', () => {
     await router.handleToolCall('chrome_switch_profile', { profile: 'centium' });
     const result = await router.handleToolCall('workato_recipe_status', { recipe_id: 1 });
 
+    // One block, one object: the payload's own keys, then the context.
     const blocks = result.content as any[];
-    expect(blocks).toHaveLength(2);
-    expect(JSON.parse(blocks[1].text).context).toEqual({
-      tab_id: 42,
-      host: 'app.workato.com',
-      workspace_id: 5150,
-      profile: 'centium',
+    expect(blocks).toHaveLength(1);
+    expect(JSON.parse(blocks[0].text)).toEqual({
+      recipe_id: 1,
+      context: {
+        tab_id: 42,
+        host: 'app.workato.com',
+        workspace_id: 5150,
+        profile: 'centium',
+      },
     });
-    // The tool payload block is untouched.
-    expect(blocks[0].text).toBe('{"recipe_id":1}');
   });
 
   test('lets explicit tab or window targets override a pinned session tab id', async () => {

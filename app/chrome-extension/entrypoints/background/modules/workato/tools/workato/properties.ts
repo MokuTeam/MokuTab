@@ -480,7 +480,7 @@ class WorkatoPropertiesTool extends BaseBrowserToolExecutor {
       return await this.delete(tab.tabId, scope, projectId, args, reveal);
     } catch (err) {
       if (err instanceof WorkatoDispatchError) {
-        return createErrorResponse(`${err.code}: ${err.message}`);
+        return createErrorResponse(`${err.message}`);
       }
       return createErrorResponse(
         `workato_properties failed: ${err instanceof Error ? err.message : String(err)}`,

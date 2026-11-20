@@ -10,6 +10,10 @@ Most items come from real recipe-building sessions: the pattern that repeats oft
 
 2.0 keeps a 1.x machine working while it moves over. 3.0 removes what only that needs: the old names of the four renamed core tools, the 1.x command aliases of the bridge, the fallback to the 1.x environment variable names, and the empty flow-list answer for bridges older than 2.0. The function registry keeps counting the 1.x commit identity as the machine for good: the vault gate depends on it.
 
+### 3.0: one spelling per parameter
+
+A client that runs tools from a script refuses an argument the schema does not declare, so a guessed name fails the whole script. The schemas mix `timeout_ms` (24 tools), `timeoutMs` (6) and `timeout` (3); `query` (9) and `text` (5) for a search string; `limit`, `maxResults`, `max_items` and `per_page` for a cap. `tabId` and `windowId` stay as they are (128 and 62 tools). The rest moves to one snake_case spelling with the other names removed, which is a breaking change and belongs with the other 3.0 removals.
+
 ### A module filter per registration
 
 `/mcp?modules=...`, so the sessions of one project see fewer modules than the machine has switched on. The filter is the same code as the popup switch; it waits for a project that needs it.

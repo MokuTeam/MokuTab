@@ -6,13 +6,52 @@
  */
 
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { CORE_TOOL_SCHEMAS, aliasDescription } from '@mokuhub/mokutab-shared';
+import {
+  CORE_DESTRUCTIVE_TOOL_NAMES,
+  CORE_READ_ONLY_TOOL_NAMES,
+  CORE_TOOL_SCHEMAS,
+  aliasDescription,
+} from '@mokuhub/mokutab-shared';
 import { INSTALLED_MODULES } from '../modules';
 import type { BridgeModule } from './module-api';
 
+type ListedModule = Pick<BridgeModule, 'tools' | 'readOnlyTools' | 'destructiveTools'>;
+
+/**
+ * MCP annotations from the kind lists of core and the modules. A read-only
+ * tool is also idempotent: a client may run it beside other reads and repeat
+ * it after a dropped connection. Everything else says readOnlyHint:false. The
+ * tools that only remove also say destructiveHint:true; the other writes leave
+ * it unset, which a client reads as "may be destructive" (the MCP default):
+ * true of the ones that run caller-chosen code or requests, and the safe side
+ * for the rest.
+ */
+function withKindAnnotations(tools: Tool[], modules: readonly ListedModule[]): Tool[] {
+  const readOnly = new Set<string>(CORE_READ_ONLY_TOOL_NAMES);
+  const destructive = new Set<string>(CORE_DESTRUCTIVE_TOOL_NAMES);
+  for (const module of modules) {
+    for (const name of module.readOnlyTools ?? []) readOnly.add(name);
+    for (const name of module.destructiveTools ?? []) destructive.add(name);
+  }
+  return tools.map((tool) => ({
+    ...tool,
+    annotations: {
+      ...tool.annotations,
+      ...(readOnly.has(tool.name)
+        ? { readOnlyHint: true, idempotentHint: true }
+        : destructive.has(tool.name)
+          ? { readOnlyHint: false, destructiveHint: true }
+          : { readOnlyHint: false }),
+    },
+  }));
+}
+
 /** The tools listed with these modules on: core first, then each module's. */
-export function listedToolSchemas(modules: readonly Pick<BridgeModule, 'tools'>[]): Tool[] {
-  return [...CORE_TOOL_SCHEMAS, ...modules.flatMap((module) => module.tools)];
+export function listedToolSchemas(modules: readonly ListedModule[]): Tool[] {
+  return withKindAnnotations(
+    [...CORE_TOOL_SCHEMAS, ...modules.flatMap((module) => module.tools)],
+    modules,
+  );
 }
 
 /** Every tool this bridge has: core plus every installed module, on or off. */

@@ -303,7 +303,7 @@ class WorkatoCreateProjectTool extends BaseBrowserToolExecutor {
       };
     } catch (err) {
       if (err instanceof WorkatoDispatchError) {
-        return createErrorResponse(`${err.code}: ${err.message}`);
+        return createErrorResponse(`${err.message}`);
       }
       return createErrorResponse(
         `workato_create_project failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -403,7 +403,7 @@ class WorkatoUpdateProjectTool extends BaseBrowserToolExecutor {
       };
     } catch (err) {
       if (err instanceof WorkatoDispatchError) {
-        return createErrorResponse(`${err.code}: ${err.message}`);
+        return createErrorResponse(`${err.message}`);
       }
       return createErrorResponse(
         `workato_update_project failed: ${err instanceof Error ? err.message : String(err)}`,

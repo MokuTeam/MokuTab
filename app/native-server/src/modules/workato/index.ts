@@ -118,6 +118,8 @@ export const workatoModule: BridgeModule = {
   instructions: WORKATO_MODULE.instructions,
   // The 1.x workato_* names of the core profile/bridge tools, until 3.0.
   aliases: WORKATO_MODULE.aliases,
+  readOnlyTools: WORKATO_MODULE.readOnlyTools,
+  destructiveTools: WORKATO_MODULE.destructiveTools,
   // Every 1.x bridge served the Workato tools.
   onAfterUpgrade: true,
   owns: (name) => OWNED.has(name),

@@ -140,7 +140,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function errorText(err: unknown): string {
-  if (err instanceof WorkatoDispatchError) return `${err.code}: ${err.message}`;
+  if (err instanceof WorkatoDispatchError) return `${err.message}`;
   return err instanceof Error ? err.message : String(err);
 }
 

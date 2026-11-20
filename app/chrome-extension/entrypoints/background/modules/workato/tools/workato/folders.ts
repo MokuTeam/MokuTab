@@ -443,7 +443,7 @@ class WorkatoListFoldersTool extends BaseBrowserToolExecutor {
       return { content: [{ type: 'text', text: JSON.stringify(payload) }], isError: false };
     } catch (err) {
       if (err instanceof WorkatoDispatchError) {
-        return createErrorResponse(`${err.code}: ${err.message}`);
+        return createErrorResponse(`${err.message}`);
       }
       return createErrorResponse(
         `workato_list_folders failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -521,7 +521,7 @@ class WorkatoCreateFolderTool extends BaseBrowserToolExecutor {
       };
     } catch (err) {
       if (err instanceof WorkatoDispatchError) {
-        return createErrorResponse(`${err.code}: ${err.message}`);
+        return createErrorResponse(`${err.message}`);
       }
       return createErrorResponse(
         `workato_create_folder failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -618,7 +618,7 @@ class WorkatoUpdateFolderTool extends BaseBrowserToolExecutor {
       };
     } catch (err) {
       if (err instanceof WorkatoDispatchError) {
-        return createErrorResponse(`${err.code}: ${err.message}`);
+        return createErrorResponse(`${err.message}`);
       }
       return createErrorResponse(
         `workato_update_folder failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -715,7 +715,7 @@ class WorkatoDeleteFolderTool extends BaseBrowserToolExecutor {
       };
     } catch (err) {
       if (err instanceof WorkatoDispatchError) {
-        return createErrorResponse(`${err.code}: ${err.message}`);
+        return createErrorResponse(`${err.message}`);
       }
       return createErrorResponse(
         `workato_delete_folder failed: ${err instanceof Error ? err.message : String(err)}`,

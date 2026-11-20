@@ -83,7 +83,11 @@ The tools started from [hangwin/mcp-chrome](https://github.com/hangwin/mcp-chrom
 | `chrome_watch_events` | none     | `watch_ids`, `cursor`, `wait_seconds`                          | Events recorded since a cursor                                         |
 | `chrome_watch_stop`   | none     | `watch_id`, `all`                                              | Stop one watch, or all of them                                         |
 
-**Leases.** Several agents sharing one MCP server and one Chrome profile each lease a tab and pass `lease` on every call; the bridge turns it into the right profile and `tabId` and never activates or focuses the tab. The tab opens in an unfocused agents window, or in a window of its own with `own_window: true` (the choice for `chrome_computer` mouse and keyboard input, which a hidden tab drops). While a session holds a lease, a tab-targeting call that carries neither `lease` nor `tabId` is refused; `MOKUTAB_STRICT_TABS=1` makes that permanent. Calls on the same tab run one at a time. A lease ends with `chrome_release_tab`, when its tab closes, or after 30 minutes unused.
+**Leases.** Several agents sharing one Chrome profile each lease a tab and pass `lease` on every call; the bridge turns it into the right profile and `tabId` and never activates or focuses the tab. The tab opens in an unfocused agents window, or in a window of its own with `own_window: true` (the choice for `chrome_computer` mouse and keyboard input, which a hidden tab drops). While a session holds a lease, its tab-targeting calls that carry neither `lease` nor `tabId` are refused (`StrictTabs`); `MOKUTAB_STRICT_TABS=1` makes that permanent. A lease ends with `chrome_release_tab`, when its tab closes, or after 30 minutes unused.
+
+**One lease table per bridge.** Leases are kept for the whole bridge, each owned by the MCP session that took it, because separate client sessions share the browser as well. A tab leased in one session is off limits to the others: a call that names it (or a session pinned to it) without its lease is refused with `TabLeased` and nothing is sent, `chrome_close_tabs` will not close it, and it cannot be adopted a second time. A Workato call that names no tab never picks a leased tab: every tool call carries the profile's leased tab ids to the extension, which leaves them out of "the first Workato tab" and answers `TabLeased` when nothing else is open. The token is the capability, so whoever passes a lease uses its tab, and a session that reconnected goes on with its lease by passing it. `chrome_watch_start` refuses `tabIds` another session leased; a watch started with a `url` pattern still reads every tab the pattern matches. `chrome_list_profiles` shows a session its own leases with their tokens and other sessions' leased tabs without (`other_session: true`). Not covered: a core browser tool that names no tab acts on the active tab even when that tab was adopted by a lease.
+
+**The order of calls on one tab.** A call that drives the page (input, navigation, a snapshot, the Workato UI tools) takes its tab alone. The Workato module's read-only tools that only fetch from the page share the tab: several run at once, behind a driving call queued ahead of them and ahead of the next one. Workato itself answers the requests of one session mostly one after another (six parallel `GET /folders` from the page completed at 0.28 s, 0.59 s, 0.88 s, 1.21 s, 1.48 s and 1.80 s on 2026-11-20), so fanning reads out over one login saves little.
 
 **Watches.** `chrome_watch_start` runs an agent-written script (the body of an async function returning JSON, `null` while the page is not ready) in the chosen tabs, by tab id or URL pattern and in any profile, every `every_seconds`, and records an event when the result changes: an array wakes only on items not seen before (identified by `key`), any other value when it differs. The reply carries a `wait_command` (`mokutab-bridge watch-wait ...`) that an agent runs in the background: it long-polls the bridge and exits with the events, so a quiet page costs no tokens. One wait can cover several watches. Watches survive bridge restarts and expire after `ttl_minutes`. Readings run through `chrome.userScripts` when "Allow User Scripts" is on for the extension (no debugging banner, page CSP does not apply), otherwise through the debugger.
 
@@ -132,6 +136,27 @@ A preview or a pause keeps its window for 10 minutes, so `chrome_fn_run({run_id,
 
 **Drafts and the run log.** Every phase of a run appends a line to `<state dir>/fn-runs/YYYY-MM.jsonl` (the bridge state dir, `%LOCALAPPDATA%\mcp-chrome-bridge` on Windows, a directory that keeps its 1.x name; `MOKUTAB_FN_STATE_DIR` overrides it): time, run id, function and version, phase, status, whether a commit ran, caller, profile, failed step, `refused`, vault item ids, duration, and a keyed hash of the params (an HMAC with a per-machine key), never their values. A `commit_start` line is written right before each commit step, so a bridge that dies mid-commit still leaves a record that blocks a duplicate. A run log that cannot be written comes back as `log_warning` in the reply instead of hiding the outcome. A function that never ran successfully at all is hidden from `chrome_fn_list` unless `include_drafts: true`; one whose write never committed successfully is listed with `draft: true`.
 
+### One JSON object per result
+
+Every result that carries JSON leaves the bridge as a single text block holding a single JSON object, so a client that runs tools from a script gets a parsed object and a model reads one shape:
+
+| What the tool produced            | What the caller gets                                |
+| --------------------------------- | --------------------------------------------------- |
+| a JSON object                     | that object                                         |
+| a headline, then JSON             | the object with the headline under `headline`       |
+| a JSON array                      | `{"items": [...]}`                                  |
+| the Workato context block         | the `context` key of the same object                |
+| text plus a context block         | `{"text": "...", "context": {...}}`                 |
+| text only (a snapshot, page text) | the text, unchanged                                 |
+| an image                          | the blocks, unchanged                               |
+| a failure                         | `{"error": {"code": "...", "message": "..."}, ...}` |
+
+The headline is not called `summary` because several payloads have a `summary` of their own. A payload that already has a `headline` or `context` key keeps it, and the folded one becomes `_headline` or `_context`. JSON text is passed through as the tool wrote it, so a long id or `1.0` is not rewritten.
+
+**Errors.** `error.code` is the name a refusal starts with (`TabNotFound`, `TabLeased`, `StrictTabs`, `ContextChanged`, `ContextMismatch`, `VersionConflict`, `WorkatoApiError`, `ScriptExecutionFailed`, `UnknownLease`, `ProfileNotConnected`, `CallTimeout`, `ProfileCallFailed`, `CallCancelled` and others), or `ToolError` when it names none. A failure that was one JSON object keeps its other fields beside `error`; JSON that followed a message, such as a response body, is under `details`.
+
+**Annotations.** Every tool is served with `readOnlyHint`. The 16 core and 30 Workato tools that change nothing carry `readOnlyHint: true` and `idempotentHint: true`; the tools whose whole job is to remove something carry `destructiveHint: true`; every other write leaves `destructiveHint` to the MCP default. The hint is about Workato and the page: a read tool still writes the local file named in `out_file`, so it is not a reason for a client to skip its own check of the arguments. The lists are `CORE_READ_ONLY_TOOL_NAMES`, `CORE_DESTRUCTIVE_TOOL_NAMES` and their Workato counterparts in the shared package.
+
 ### Large results: out_file and auto-file
 
 The bridge serves three extra properties to every tool whose result can grow large, injected at `tools/list` time rather than repeated per schema:
@@ -148,7 +173,7 @@ Which tools get them:
 - **`chrome_screenshot`** is served the properties with `auto_file` off by default; it spills only when asked.
 - **The Workato module's read tools**, `auto_file` on by default: `workato_list_jobs`, `workato_job_trace`, `workato_search_recipes`, `workato_recipe_step_search`, `workato_recipe_callers`, `workato_recipe_grep`, `workato_recipe_connections`, `workato_recipe_version_diff`, `workato_recipe_status`, `workato_apps_list`, `workato_pick_list`, `workato_step_schema` (when called without `apply_to`), `workato_run_query`, `workato_call_action`, `workato_lookup_tables_list`, `workato_lookup_table_get`, `workato_lookup_table_row_search`, `workato_data_tables_list`, `workato_data_table_get`, `workato_data_table_row_list`, `workato_deployments_list` and `workato_deploy_plan`. Four Workato tools own a hand-written file hook and keep it: `workato_pull_recipe`, `workato_lcap_page_get`, `workato_api_request` and `workato_adapter_meta`.
 
-What comes back instead of the payload is a summary: `saved_to`, `bytes`, `content_type`, `version_no`, the top-level keys, the item count of each depth-1 array, and any truncation flags the payload carried (`truncated`, `truncated_fields`, `total_bytes`, `total_items`, `total_count`, `has_more`, `next_page`, `next_cursor`, `limit`, `coverage`, `search_mode`, `warning`), copied verbatim so a partial result cannot read as complete. Nothing is written for a failed call.
+The file holds what the call would have returned inline: the same single JSON object, without `context`, so it parses as it is (`.json`); a result with no JSON in it is written as text (`.txt`). What comes back instead of the payload is a summary: `saved_to`, `bytes`, `content_type`, `version_no`, the top-level keys, the item count of each depth-1 array, and any truncation flags the payload carried (`truncated`, `truncated_fields`, `total_bytes`, `total_items`, `total_count`, `has_more`, `next_page`, `next_cursor`, `limit`, `coverage`, `search_mode`, `warning`), copied verbatim so a partial result cannot read as complete. Nothing is written for a failed call.
 
 Auto-mode files accumulate under `<tmpdir>/mokutab-results/session-<pid>-<stamp>/`. There is no TTL or size cap yet. Inline results and automatic spills are redacted; `chrome_javascript` with an explicit `out_file` writes the returned value itself, unredacted.
 
@@ -182,7 +207,7 @@ The extension popup has a **Modules** section with one switch per module. It is 
 
 **Tab resolution.** A tool targets, in order: an explicit `tabId`, the tab pinned by `chrome_switch_profile`, a Workato tab in the same window (`windowId` where the tool accepts it), then any open Workato app tab. It never targets "whatever tab happens to be focused". Two different Workato hosts open at once (say US and EU) is ambiguous and fails with `MultipleWorkatoHosts`. An explicit `tabId` that no longer resolves to a signed-in Workato app tab now throws instead of falling through to another tab.
 
-**Every successful `workato_*` response carries a context block.** One extra text block, under 200 bytes, appended last:
+**Every successful `workato_*` response says where it ran.** The result is one JSON object, and its `context` key names the tab:
 
 ```json
 {
@@ -197,7 +222,7 @@ The extension popup has a **Modules** section with one switch per module. It is 
 }
 ```
 
-`profile` is added by the bridge on the top-level routed response. Workato resolves the workspace from the tab's own session, so this is the only thing in a response that distinguishes "recipe 123 in production" from "recipe 123 in the sandbox". Resolving it can never fail a call: when it cannot be read, the block is simply absent. It is also absent when a call targets `windowId` rather than a tab, and on the `out_file` responses of `workato_pull_recipe` and `workato_lcap_page_get` (the file's own `origin` block carries the same facts). Response parsers should keep reading the FIRST text block; the context block is always last.
+`profile` is added by the bridge on the top-level routed response. Workato resolves the workspace from the tab's own session, so this is the only thing in a response that distinguishes "recipe 123 in production" from "recipe 123 in the sandbox". Resolving it can never fail a call: when it cannot be read, the block is simply absent. It is also absent when a call targets `windowId` rather than a tab, and on the `out_file` responses of `workato_pull_recipe` and `workato_lcap_page_get` (the file's own `origin` block carries the same facts). Inside the bridge the extension still appends it as a separate last text block; the router folds it into the object on the way out (see [One JSON object per result](#one-json-object-per-result)).
 
 **A pinned session pins the workspace, not just the tab.** `chrome_switch_profile(profile, tabId)` reads that tab's workspace and environment once and keeps the whole tuple. Every later call, top-level and nested, carries the pinned tab and an `expected_context`. Writes verify it before acting and fail with `ContextMismatch`. A profile that disconnects and reconnects bumps a registry generation, the pinned tab is re-read, and a workspace or environment that moved fails the call with `ContextChanged`.
 

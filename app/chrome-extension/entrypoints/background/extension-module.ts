@@ -36,6 +36,12 @@ export interface ExtensionModule {
    * never turn a successful call into a failure.
    */
   afterCall?(name: string, args: any, result: ToolResult): Promise<ToolResult>;
+  /**
+   * Tools that only fetch from the page and never drive it: several of them
+   * may run on one tab at once (see tools/tab-queue.ts). Every other tool
+   * takes its tab alone.
+   */
+  sharesTab?(name: string): boolean;
 }
 
 let cache: ModuleStates | null = null;

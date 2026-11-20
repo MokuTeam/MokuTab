@@ -94,7 +94,7 @@ describe('the 1.x names of the profile/bridge tools', () => {
 
     const aliased = createToolRouter({ switch: memorySwitch() });
     const viaOld = await aliased.handleToolCall('workato_switch_profile', { profile: 'personal' });
-    expect(text(viaOld).split('\n')[0]).toBe(text(viaNew).split('\n')[0]);
+    expect(JSON.parse(text(viaOld)).headline).toBe(JSON.parse(text(viaNew)).headline);
     const listedOld = JSON.parse(text(await aliased.handleToolCall('workato_list_profiles', {})));
     const listedNew = JSON.parse(text(await aliased.handleToolCall('chrome_list_profiles', {})));
     expect(listedOld.session_profile).toBe('personal');
@@ -172,8 +172,9 @@ describe('a switched-off module refuses its tools', () => {
       tabId: 5,
     });
     expect(sendRequest).not.toHaveBeenCalled();
-    expect(text(result)).toContain('profile context: "personal" and tab ID: 5');
-    const summary = JSON.parse(text(result).split('\n')[1]).session_context;
+    const switched = JSON.parse(text(result));
+    expect(switched.headline).toContain('profile context: "personal" and tab ID: 5');
+    const summary = switched.session_context;
     expect(Object.keys(summary)).toEqual(['profile', 'tab_id', 'pinned_at']);
   });
 

@@ -33,7 +33,7 @@ import type {
   PreparedModuleCall,
 } from './module-api';
 import { moduleSwitch, type ModuleSwitchView } from './module-switch';
-import { stampContextBlock } from './tool-result';
+import { foldToolResult, stampContextBlock } from './tool-result';
 import { handleBridgeInfoCall, isBridgeInfoTool, servedToolSchemas } from './bridge-info';
 import { handleReloadExtensionCall, isReloadExtensionTool } from './reload-extension';
 import {
@@ -50,18 +50,21 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { profileRegistry } from '../server/profile-registry';
 import {
   LEASE_ARG,
+  LEASE_IDLE_MS,
   LEASE_TAB_TOOL,
-  LeaseTable,
   RELEASE_TAB_TOOL,
   applyLease,
+  bridgeLeases,
   leaseResult,
   newLeaseId,
+  newSessionKey,
+  withLeasedTabs,
   strictTabsFromEnv,
   strictTabsViolation,
   withLeaseToolSchemas,
   type TabLease,
 } from './tab-leases';
-import { handleWatchToolCall, isWatchTool } from './browser-watch';
+import { handleWatchToolCall, isWatchTool, WATCH_START_TOOL } from './browser-watch';
 import { watchManager } from './watch-instance';
 import {
   finishFetchToFile,
@@ -83,7 +86,7 @@ function fnDeps(): FnDeps {
       vault: bitwardenVault(),
       driverFor: (profile) =>
         profileDriver(profile, (target, payload, type, timeoutMs) =>
-          profileRegistry.sendRequest(target, payload, type, timeoutMs),
+          profileRegistry.sendRequest(target, outgoing(payload, type, target), type, timeoutMs),
         ),
       connectedProfiles: () => profileRegistry.getConnectedProfiles(),
       activeProfile: () => profileRegistry.getActiveProfile(),
@@ -98,8 +101,8 @@ export const TAB_ROUTING_ARG = 'tabId';
 
 const PROFILE_ROUTING_PROPERTY = {
   type: 'string',
-  description:
-    'Optional connected Chrome profile name for this call only. Overrides this MCP session profile without changing it.',
+  // Served on ~150 tools: the long form lives in chrome_switch_profile.
+  description: 'Chrome profile for this call only (default: the session profile).',
 };
 
 const PROFILE_MANAGEMENT_TOOLS = new Set([
@@ -151,7 +154,13 @@ export interface ToolRouterOptions {
   switch?: ModuleSwitchView;
 }
 
-const CANCELLED_TEXT = 'Cancelled by the MCP client; the browser may still finish the action.';
+const CANCELLED_TEXT =
+  'CallCancelled: cancelled by the MCP client; the browser may still finish the action.';
+
+/** The code of a failed call to a profile: the one a script may want to tell apart. */
+function transportCode(err: any): string {
+  return /timed out/i.test(err?.message || '') ? 'CallTimeout' : 'ProfileCallFailed';
+}
 
 /**
  * Stop waiting when the client cancels (or its request timed out): the handler
@@ -266,11 +275,16 @@ function isConnectedProfile(profile: string): boolean {
 function requireConnectedProfile(profile: string): void {
   if (!isConnectedProfile(profile)) {
     throw new Error(
-      `profile "${profile}" is not connected. Connected profiles: ${JSON.stringify(
+      `ProfileNotConnected: profile "${profile}" is not connected. Connected profiles: ${JSON.stringify(
         profileRegistry.getConnectedProfiles(),
       )}`,
     );
   }
+}
+
+/** The payload of a message to a profile: a tool call gains the profile's leased tabs. */
+function outgoing(payload: any, messageType: string, profile: string): any {
+  return messageType === NativeMessageType.CALL_TOOL ? withLeasedTabs(payload, profile) : payload;
 }
 
 /**
@@ -291,10 +305,15 @@ async function sendRequestToExtension(
   if (profile) {
     requireConnectedProfile(profile);
     try {
-      return await profileRegistry.sendRequest(profile, messagePayload, messageType, timeoutMs);
+      return await profileRegistry.sendRequest(
+        profile,
+        outgoing(messagePayload, messageType, profile),
+        messageType,
+        timeoutMs,
+      );
     } catch (err: any) {
       throw new Error(
-        `call to pinned profile "${profile}" failed: ${err?.message || String(err)}. ` +
+        `${transportCode(err)}: call to pinned profile "${profile}" failed: ${err?.message || String(err)}. ` +
           `Connected profiles: ${JSON.stringify(profileRegistry.getConnectedProfiles())}. ` +
           'The call was NOT re-sent to another profile or to the native-messaging host, because ' +
           'this session is pinned. Use chrome_switch_profile to move the session deliberately.',
@@ -307,13 +326,13 @@ async function sendRequestToExtension(
     try {
       return await profileRegistry.sendRequest(
         activeProfile,
-        messagePayload,
+        outgoing(messagePayload, messageType, activeProfile),
         messageType,
         timeoutMs,
       );
     } catch (err: any) {
       throw new Error(
-        `call to the bridge default profile "${activeProfile}" failed: ` +
+        `${transportCode(err)}: call to the bridge default profile "${activeProfile}" failed: ` +
           `${err?.message || String(err)}. Connected profiles: ` +
           `${JSON.stringify(profileRegistry.getConnectedProfiles())}. No profile is pinned for ` +
           'this MCP session and the call was NOT re-sent through the native-messaging host, ' +
@@ -435,9 +454,11 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
     return pin ? hooks.inject(name, next, pin) : next;
   };
 
-  // Leases of THIS MCP session. Subagents share the session, so the lease id
-  // they pass is what tells their calls apart.
-  const leases = new LeaseTable();
+  // One lease table for the bridge; sessionKey marks the leases THIS MCP
+  // session took. Subagents share the session, so the lease id they pass is
+  // what tells their calls apart; other sessions are kept off a leased tab.
+  const leases = bridgeLeases;
+  const sessionKey = newSessionKey();
   let sweepTimer: NodeJS.Timeout | null = null;
 
   const closeLeaseTab = async (lease: TabLease): Promise<string | null> => {
@@ -477,7 +498,7 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
   const findTabWindow = async (profile: string, tabId: number): Promise<number | null> => {
     const reply = await profileRegistry.sendRequest(
       profile,
-      { name: CORE_TOOL_NAMES.BROWSER.GET_WINDOWS_AND_TABS, args: {} },
+      withLeasedTabs({ name: CORE_TOOL_NAMES.BROWSER.GET_WINDOWS_AND_TABS, args: {} }, profile),
       NativeMessageType.CALL_TOOL,
       15000,
     );
@@ -515,7 +536,9 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
       const held = leases.findByTab(target, adopt);
       if (held) {
         return routeError(
-          `Error: tab ${adopt} is already leased as ${held.lease} in this session. Nothing was leased.`,
+          held.owner === sessionKey
+            ? `Error: tab ${adopt} is already leased as ${held.lease} in this session. Nothing was leased.`
+            : `TabLeased: tab ${adopt} is leased by another agent session. Nothing was leased.`,
         );
       }
       let found: number | null;
@@ -558,6 +581,7 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
       profile: target,
       tabId,
       windowId,
+      owner: sessionKey,
       created_at: now,
       last_used: now,
       ...(adopted ? { adopted: true } : {}),
@@ -610,18 +634,33 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
     const hit = ids.filter((id) => typeof id === 'number' && leased.has(id));
     if (hit.length > 0) {
       return (
-        `Error: tab(s) ${hit.join(', ')} are leased in this session; close them with ` +
-        'chrome_release_tab(lease). Nothing was closed.'
+        `Error: tab(s) ${hit.join(', ')} are leased (in this session or another agent's); the ` +
+        'holder closes them with chrome_release_tab(lease). Nothing was closed.'
       );
     }
     if (typeof args.url === 'string' && args.url.trim() !== '') {
       return (
-        'Error: closing by url is refused while this session holds leased tabs in profile ' +
+        'Error: closing by url is refused while agents hold leased tabs in profile ' +
         `"${target}" (the url could match a tab another agent leased). Pass tabIds instead. ` +
         'Nothing was closed.'
       );
     }
     return null;
+  };
+
+  /** Refusal text when `tabId` is a tab another MCP session holds a lease on, else null. */
+  const foreignLeaseRefusal = (tabId: unknown, profile: string | null): string | null => {
+    if (typeof tabId !== 'number' || leases.size === 0) return null;
+    const target = profile ?? profileRegistry.getActiveProfile();
+    if (!target) return null;
+    const held = leases.findByTab(target, tabId);
+    if (!held || held.owner === sessionKey) return null;
+    const idleMinutes = Math.round((Date.now() - held.last_used) / 60_000);
+    return (
+      `TabLeased: tab ${tabId} in profile "${target}" is leased by another agent session ` +
+      `(idle ${idleMinutes} min; an idle lease ends after ${LEASE_IDLE_MS / 60_000}). Nothing ` +
+      'was sent. Work in a tab of your own: chrome_lease_tab.'
+    );
   };
 
   const handleReleaseTab = async (args: JsonObject): Promise<CallToolResult> => {
@@ -630,7 +669,7 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
     if (!lease) {
       return routeError(
         `Error: unknown lease "${args.lease}". Leases of this session: ` +
-          `${JSON.stringify(leases.ids())}.`,
+          `${JSON.stringify(leases.ids(sessionKey))}.`,
       );
     }
     leases.delete(id);
@@ -735,7 +774,7 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
                   session_context: sessionSummary(),
                   server_default_profile: defaultProfile,
                   connected_profiles: connected,
-                  leases: leases.summary(Date.now()),
+                  leases: leases.summary(Date.now(), sessionKey),
                   routing_note: session
                     ? `This session is pinned to profile "${session.profile}"` +
                       (session.tabId !== null ? ` and tab ${session.tabId}` : '') +
@@ -768,6 +807,8 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
           );
         }
         const nextSessionTabId = normalizeTabId(args?.tabId);
+        const foreignPin = foreignLeaseRefusal(nextSessionTabId, targetProfile);
+        if (foreignPin) return routeError(foreignPin);
         const profileChanged = session?.profile !== targetProfile;
         const nextTabId =
           nextSessionTabId !== null
@@ -840,7 +881,7 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
       // A lease names both the profile and the tab of this call.
       let leaseProfile: string | null = null;
       if (routed.args[LEASE_ARG] !== undefined) {
-        const applied = applyLease(name, routed.args, leases, Date.now());
+        const applied = applyLease(name, routed.args, leases, Date.now(), sessionKey);
         if (!applied.ok) return routeError(`Error: ${applied.error}`);
         if (routed.profile && routed.profile !== applied.lease.profile) {
           return routeError(
@@ -856,6 +897,14 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
       // Watches live in the bridge, outside any one session; start reads its tabs
       // in the routed profile.
       if (isWatchTool(name)) {
+        // A watch runs its script in the tabs it names: not in a tab another
+        // session leased. (A url pattern still reads every tab it matches.)
+        if (name === WATCH_START_TOOL && Array.isArray(routed.args.tabIds)) {
+          for (const tabId of routed.args.tabIds) {
+            const foreign = foreignLeaseRefusal(tabId, routingProfile);
+            if (foreign) return routeError(foreign);
+          }
+        }
         return await handleWatchToolCall(
           watchManager,
           name,
@@ -913,12 +962,18 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
       const strictRefusal = strictTabsViolation(
         name,
         routed.args || {},
-        leases.size > 0 || strictTabsFromEnv(),
+        leases.ownedBy(sessionKey) > 0 || strictTabsFromEnv(),
       );
       if (strictRefusal) return routeError(strictRefusal);
       const closeRefusal = leasedTabCloseGuard(name, routed.args || {}, routingProfile);
       if (closeRefusal) return routeError(closeRefusal);
       let effectiveArgs: any = withSessionTarget(name, routed.args || {}, routingProfile);
+      // A tab another session leased is that session's: naming it (or being
+      // pinned to it) without its lease is refused.
+      if (leaseProfile === null) {
+        const foreign = foreignLeaseRefusal(effectiveArgs?.tabId, routingProfile);
+        if (foreign) return routeError(foreign);
+      }
       // Unredacted output is the bridge's call, never the caller's: drop any
       // rawOutput here, whatever the tool. prepareAutoFileCall sets it again
       // only for chrome_javascript with an explicit out_file.
@@ -1032,8 +1087,10 @@ export function createToolRouter(options: ToolRouterOptions = {}): ToolRouter {
 
   const listTools = async () => ({ tools: servedToolList(enabledModules(), autoFileRules) });
 
+  // Every way out of a call (a refusal, a bridge-side tool, a routed reply, a
+  // cancel) leaves as one JSON object: see foldToolResult.
   const handleToolCallWithCancel = (name: string, args: any, signal?: AbortSignal) =>
-    raceAbort(handleToolCall(name, args, signal), signal);
+    raceAbort(handleToolCall(name, args, signal), signal).then(foldToolResult);
 
   return { listTools, handleToolCall: handleToolCallWithCancel };
 }

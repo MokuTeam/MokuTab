@@ -575,7 +575,7 @@ function ok(payload: unknown): ToolResult {
 function toolError(err: unknown, tool: string): ToolResult {
   if (err instanceof WorkatoDispatchError) {
     return createErrorResponse(
-      `${err.code}: ${err.message}` +
+      `${err.message}` +
         (err.code === 'TabNotFound'
           ? ' Note: an omitted `profile` resolves against the default Chrome profile, which ' +
             'reports TabNotFound for a tab that exists under another profile. Pass tabId AND ' +

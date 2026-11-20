@@ -344,16 +344,19 @@ describe('applyAutoFile text results', () => {
     fs.rmSync(summary.saved_to, { force: true });
   });
 
-  test('writes the `summary\\nJSON` response form verbatim and still describes it', () => {
-    const outFile = path.join(tmpDir, 'search.txt');
+  test('writes the `summary\\nJSON` response form as the one JSON object the call returns inline', () => {
+    const outFile = path.join(tmpDir, 'search.json');
     const { plan } = prepareAutoFileCall('workato_search_recipes', { out_file: outFile });
     const text = `Found 2 recipes\n${JSON.stringify({ recipes: [{ id: 1 }, { id: 2 }] })}`;
 
     const result = applyAutoFile('workato_search_recipes', plan, textResult(text)) as any;
     const summary = parseSummary(result);
 
-    expect(fs.readFileSync(outFile, 'utf8')).toBe(text);
-    expect(summary.content_type).toBe('text/plain');
+    expect(JSON.parse(fs.readFileSync(outFile, 'utf8'))).toEqual({
+      headline: 'Found 2 recipes',
+      recipes: [{ id: 1 }, { id: 2 }],
+    });
+    expect(summary.content_type).toBe('application/json');
     expect(summary.item_counts).toEqual({ recipes: 2 });
   });
 

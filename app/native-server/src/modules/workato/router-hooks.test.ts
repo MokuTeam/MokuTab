@@ -109,12 +109,14 @@ describe('the workspace re-check after a profile reconnects', () => {
     workspace = 9999;
     const refused = await router.handleToolCall('workato_recipe_status', { recipe_id: 1 });
     expect(refused.isError).toBe(true);
-    expect(text(refused)).toBe(
-      'ContextChanged: profile "centium" reconnected and tab 42 is now workspace 9999, ' +
+    expect(JSON.parse(text(refused)).error).toEqual({
+      code: 'ContextChanged',
+      message:
+        'profile "centium" reconnected and tab 42 is now workspace 9999, ' +
         'environment production, but this session is pinned to workspace 5150, environment ' +
         'production. Nothing was sent. Check workato_session_context, then re-pin with ' +
         'chrome_switch_profile(profile, tabId).',
-    );
+    });
     expect(sent()).toEqual(['workato_session_context']);
 
     // The refusal did not adopt the generation: the next call checks again.

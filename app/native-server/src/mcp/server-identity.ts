@@ -25,7 +25,8 @@ export const SERVER_NAME = 'MokuTab';
  */
 export const CORE_INSTRUCTIONS = [
   'Tools for a logged-in browser.',
-  'Large results spill to a file (auto_file); out_file picks the path.',
+  'JSON results are one object (context: the tab, error: {code, message}).',
+  'Large ones go to a file: saved_to (auto_file, out_file).',
   "Writes need their own flag; read a tool's description before first use.",
   'Pick by task: which build answers -> chrome_bridge_info;',
   'parallel agents -> each takes chrome_lease_tab, passes its lease;',

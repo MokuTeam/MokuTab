@@ -124,6 +124,9 @@ export interface BridgeModule {
    * served schema and runs the target, while the module is on.
    */
   aliases?: Readonly<Record<string, string>>;
+  /** Tools that change nothing (readOnlyHint) and tools that only remove (destructiveHint). */
+  readOnlyTools?: readonly string[];
+  destructiveTools?: readonly string[];
   /**
    * 1.x served this module's tools with no switch, so a machine upgraded from
    * 1.x keeps it on (its first 2.x start records that in config.json). A module

@@ -16,6 +16,7 @@ import { moduleSwitch } from './module-switch';
 import { listedToolSchemas, withAliasToolSchemas } from './catalogue';
 import { withProfileRoutingToolSchemas } from './register-tools';
 import { buildServerInstructions, SERVER_NAME, serverVersion } from './server-identity';
+import { foldToolResult } from './tool-result';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -133,7 +134,8 @@ const handleToolCall = async (name: string, args: any): Promise<CallToolResult> 
     });
     return result as CallToolResult;
   } catch (error: any) {
-    return {
+    // Same shape as a failure the bridge reports itself.
+    return foldToolResult({
       content: [
         {
           type: 'text',
@@ -141,7 +143,7 @@ const handleToolCall = async (name: string, args: any): Promise<CallToolResult> 
         },
       ],
       isError: true,
-    };
+    });
   }
 };
 
