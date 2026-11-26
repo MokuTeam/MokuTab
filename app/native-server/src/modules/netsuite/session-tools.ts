@@ -85,6 +85,8 @@ export interface NsDeps {
   vaultUris(item: string): Promise<VaultUri[]>;
   /** The username of a vault item (never its password). */
   vaultUsername(item: string): Promise<string>;
+  /** Whether a vault item has a TOTP (never the secret); absent: not known. */
+  vaultHasTotp?(item: string): Promise<boolean>;
   connectedProfiles(): string[];
   machine: string;
   sleep(ms: number): Promise<void>;
@@ -191,6 +193,8 @@ export class NsSessionTools {
 
   /** Checked vault usernames by item and host, with when they were read. */
   private readonly vaultUsers = new Map<string, { user: string | null; at: number }>();
+  /** Whether a vault item has a TOTP, per item (no secret kept). */
+  private readonly vaultTotp = new Map<string, { has: boolean; at: number }>();
 
   constructor(private readonly deps: NsDeps) {}
 
@@ -305,6 +309,20 @@ export class NsSessionTools {
     return user;
   }
 
+  /** Whether a checked vault item has a TOTP; null when that cannot be told. Cached like the username. */
+  private async vaultHasTotp(item: unknown): Promise<boolean | null> {
+    if (typeof item !== 'string' || !item || !this.deps.vaultHasTotp) return null;
+    const cached = this.vaultTotp.get(item);
+    if (cached && this.deps.now() - cached.at < VAULT_USER_TTL_MS) return cached.has;
+    try {
+      const has = await this.deps.vaultHasTotp(item);
+      this.vaultTotp.set(item, { has, at: this.deps.now() });
+      return has;
+    } catch {
+      return null;
+    }
+  }
+
   /** args.user, else the checked vault item's username, else the profile's remembered user. */
   private async who(args: Json, account: NsAccount, profile: string): Promise<Who> {
     if (typeof args.user === 'string' && args.user.trim()) {
@@ -363,6 +381,113 @@ export class NsSessionTools {
           }
         : {}),
     };
+  }
+
+  // The popup's NetSuite sessions section (metadata only). Every failure is
+  // a short code the popup maps to its own text: store_unreachable,
+  // other_user, could_not_check, open_failed.
+
+  /** The store's live and dying entries, as the popup lists them. */
+  async popupList(): Promise<Json> {
+    let result: Json;
+    try {
+      result = await this.status(null);
+    } catch {
+      return { ok: false, code: 'store_unreachable' };
+    }
+    if (result.state !== 'ok') return { ok: false, code: 'store_unreachable' };
+    const time = (v: unknown): number | null => {
+      const ms = untilMs(v);
+      return Number.isFinite(ms) && ms > 0 ? ms : null;
+    };
+    const entries = (result.entries as Json[])
+      .filter((e) => e?.state === 'live' || e?.state === 'dying')
+      .map((e) => ({
+        account: e.account,
+        user: typeof e.user === 'string' ? e.user : null,
+        role: e.role ?? null,
+        state: e.state,
+        abs_expiry: time(e.abs_expiry),
+        idle_expiry: time(e.idle_expiry),
+        last_activity: time(e.last_activity),
+        last_where:
+          e.last_where && typeof e.last_where === 'object'
+            ? {
+                machine: String(e.last_where.machine ?? ''),
+                profile: String(e.last_where.profile ?? ''),
+              }
+            : null,
+      }));
+    return { ok: true, entries };
+  }
+
+  /**
+   * The popup's click on an account (and user): open it in this profile,
+   * logged in. A click is an explicit action, so the store's live user is
+   * imported even when this profile remembers nobody for the account (and is
+   * remembered after). A session this profile already has is replaced only
+   * when a probe says it is logged out: alive with the same user just opens,
+   * alive with another user or an unknown user, or a probe that could not
+   * tell, changes nothing. Answers the URL the extension opens, never a value.
+   */
+  async popupOpen(payload: Json, profile: string): Promise<Json> {
+    const account = normalizeAccount(String(payload?.account ?? ''));
+    if (!account) return { ok: false, code: 'open_failed' };
+    const wanted =
+      typeof payload?.user === 'string' && payload.user.trim()
+        ? payload.user.trim().toLowerCase()
+        : null;
+    const url = `https://${account.host}/app/center/card.nl`;
+    const secrets: string[] = [];
+    try {
+      const listed = await this.status(account);
+      if (listed.state !== 'ok') return { ok: false, code: 'store_unreachable' };
+      const live = (listed.entries as Json[])
+        .filter(
+          (e) =>
+            e?.account === account.account &&
+            (e?.state === 'live' || e?.state === 'dying') &&
+            (!wanted || (typeof e.user === 'string' && e.user.toLowerCase() === wanted)),
+        )
+        .sort((x, y) => (untilMs(y?.last_activity) || 0) - (untilMs(x?.last_activity) || 0));
+      if (!live.length) return { ok: false, code: 'open_failed' };
+      const user: string | null = typeof live[0].user === 'string' ? live[0].user : null;
+      let local: string | null;
+      try {
+        local = await this.localFingerprint(account, profile);
+      } catch {
+        return { ok: false, code: 'could_not_check' };
+      }
+      if (local) {
+        const state = await this.probe(account, profile);
+        if (state === 'unknown') return { ok: false, code: 'could_not_check' };
+        if (state === 'alive') {
+          const identity = await this.deps.tabIdentity(profile, account.host).catch(() => null);
+          const current = identity?.user
+            ? identity.user.trim().toLowerCase()
+            : this.deps.users.get(profile, account.account);
+          if (!current || !user) return { ok: false, code: 'could_not_check' };
+          if (current !== user.toLowerCase()) return { ok: false, code: 'other_user' };
+          return { ok: true, url, action: 'opened' };
+        }
+      }
+      const result = await this.ensureOnce(
+        account,
+        { user, source: user ? 'args' : null },
+        profile,
+        secrets,
+      );
+      if (result.state === 'imported' || result.state === 'already_live') {
+        return { ok: true, url, action: result.state };
+      }
+      if (result.state === 'store_unconfigured' || result.state === 'no_store') {
+        return { ok: false, code: 'store_unreachable' };
+      }
+      if (result.state === 'already_live_unverified') return { ok: false, code: 'could_not_check' };
+      return { ok: false, code: 'open_failed' };
+    } catch {
+      return { ok: false, code: 'open_failed' };
+    }
   }
 
   // Transparent mode (the extension reports a host; values never leave this
@@ -724,6 +849,11 @@ export class NsSessionTools {
     }
     const fp = fingerprint(session.value);
     const now = this.deps.now();
+    // Whether this account can be renewed without a person (the item has a
+    // TOTP): only from an explicit publish with a vault item that passed the
+    // check above; a transparent publish cannot know and leaves it out.
+    const autoRenew =
+      args.transparent !== true && fromVault ? await this.vaultHasTotp(args.vault_item) : null;
     const answer = await this.deps.store.request('POST', '/entry', {
       body: {
         account: account.account,
@@ -736,6 +866,7 @@ export class NsSessionTools {
         origin: { machine: this.deps.machine, profile },
         login_at: args.login_at === true ? now : null,
         seen_at: now,
+        ...(typeof autoRenew === 'boolean' ? { auto_renew: autoRenew } : {}),
       },
       profile,
     });

@@ -200,6 +200,7 @@ function toolsWith(
     partialWrite?: boolean;
     profiles?: string[];
     vaultUris?: string[];
+    totp?: boolean | 'throw';
   } = {},
 ) {
   const store = fakeStore(routes);
@@ -248,6 +249,15 @@ function toolsWith(
       touched.push('vaultUsername');
       return 'Support_User@example.com';
     },
+    ...(opts.totp === undefined
+      ? {}
+      : {
+          vaultHasTotp: async () => {
+            touched.push('vaultHasTotp');
+            if (opts.totp === 'throw') throw new Error('bw failed');
+            return opts.totp as boolean;
+          },
+        }),
     connectedProfiles: () => opts.profiles ?? ['work'],
     machine: 'laptop',
     sleep: async (ms) => {
@@ -453,7 +463,7 @@ describe('netsuite_session_* tools', () => {
             {
               account: '1234567_SB2',
               user: 'support_user@example.com',
-              lock: { holder: { machine: 'server-2', profile: 'bsd' }, until: lockUntil },
+              lock: { holder: { machine: 'server-2', profile: 'other' }, until: lockUntil },
             },
           ],
         },
@@ -599,7 +609,7 @@ describe('netsuite_session_* tools', () => {
         body: {
           ok: false,
           code: 'locked',
-          holder: { machine: 'server-2', profile: 'bsd' },
+          holder: { machine: 'server-2', profile: 'other' },
           until: 'T2',
         },
       },
@@ -835,7 +845,7 @@ describe('transparent mode (bridge)', () => {
         user,
         value,
         generation: (s.entry?.generation ?? 0) + 1,
-        origin: { machine: 'server-2', profile: 'bsd' },
+        origin: { machine: 'server-2', profile: 'other' },
         live: true,
       };
     };
@@ -1112,5 +1122,263 @@ describe('transparent mode (bridge)', () => {
     const t = setup({}, { remembered: 'a@b.c' });
     const out = parse(await t.tools.call('netsuite_session_status', {}, 'work'));
     expect(out).toMatchObject({ profile: 'work', expected_users: { '1234567_SB2': 'a@b.c' } });
+  });
+});
+
+describe('popup sessions section', () => {
+  const row = (over: any = {}) => ({
+    account: '1234567_SB2',
+    user: 'support_user@example.com',
+    role: '3',
+    state: 'live',
+    fp: 'aaaaaaaa',
+    abs_expiry: 5,
+    idle_expiry: 6,
+    last_activity: 7,
+    last_where: { machine: 'server-2', profile: 'other' },
+    ...over,
+  });
+  const listed =
+    (
+      entries: any[] = [
+        row({ cookies: [cookie('JSESSIONID', SECRET)] }),
+        { account: '7654321', user: 'old@example.com', role: '3', state: 'dead', fp: 'bbbbbbbb' },
+        row({
+          account: '2345678',
+          user: 'x@example.com',
+          state: 'dying',
+          fp: 'cccccccc',
+          abs_expiry: '1970-01-01T00:00:00.009Z',
+          idle_expiry: null,
+          last_activity: 8,
+          last_where: { machine: 'm', profile: 'p', token: 'nope' },
+        }),
+      ],
+    ) =>
+    () => ({ status: 200, body: { ok: true, entries } });
+  const URL_OK = `https://${HOST}/app/center/card.nl`;
+  const sameTab = { user: 'support_user@example.com', role: '3', role_id: 'customrole3' };
+  const liveLocal = (over: any = {}) => ({
+    cookies: [cookie('JSESSIONID', OTHER)],
+    probe: 'alive' as const,
+    ...over,
+  });
+
+  test('list: live and dying entries as metadata only; times are numbers, last_where two fields', async () => {
+    const { tools } = toolsWith({ 'GET /list': listed() });
+    const out = await tools.popupList();
+    expect(out).toEqual({
+      ok: true,
+      entries: [
+        {
+          account: '1234567_SB2',
+          user: 'support_user@example.com',
+          role: '3',
+          state: 'live',
+          abs_expiry: 5,
+          idle_expiry: 6,
+          last_activity: 7,
+          last_where: { machine: 'server-2', profile: 'other' },
+        },
+        {
+          account: '2345678',
+          user: 'x@example.com',
+          role: '3',
+          state: 'dying',
+          abs_expiry: 9,
+          idle_expiry: null,
+          last_activity: 8,
+          last_where: { machine: 'm', profile: 'p' },
+        },
+      ],
+    });
+    expect(JSON.stringify(out)).not.toContain(SECRET);
+  });
+
+  test('list: no store and no token answer store_unreachable', async () => {
+    const down = toolsWith({ 'GET /list': () => ({ status: 503 }) });
+    expect(await down.tools.popupList()).toEqual({ ok: false, code: 'store_unreachable' });
+    const none = toolsWith({}, {}, { tokenMissing: true });
+    expect(await none.tools.popupList()).toEqual({ ok: false, code: 'store_unreachable' });
+  });
+
+  test('open: imports the live user into a profile that remembers nobody, and remembers it', async () => {
+    const { tools, browser, users } = toolsWith({
+      'GET /list': listed(),
+      'GET /entry': () => ({ status: 200, body: entryBody() }),
+    });
+    expect(users.get('work', '1234567_SB2')).toBeNull();
+    const out = await tools.popupOpen({ account: '1234567_SB2' }, 'work');
+    expect(out).toEqual({ ok: true, url: URL_OK, action: 'imported' });
+    expect(browser.written).toHaveLength(1);
+    expect(users.get('work', '1234567_SB2')).toBe('support_user@example.com');
+    expect(JSON.stringify(out)).not.toContain(SECRET);
+  });
+
+  test('open: a live local session of the same user is only opened, never replaced', async () => {
+    const { tools, browser, store } = toolsWith(
+      { 'GET /list': listed(), 'GET /entry': () => ({ status: 200, body: entryBody() }) },
+      liveLocal({ identity: sameTab }),
+    );
+    expect(await tools.popupOpen({ account: '1234567_SB2' }, 'work')).toEqual({
+      ok: true,
+      url: URL_OK,
+      action: 'opened',
+    });
+    expect(browser.written).toHaveLength(0);
+    expect(store.calls.some((c) => c.route === '/entry')).toBe(false);
+  });
+
+  test('open: alive with no tab uses the remembered user; unknown or other user changes nothing', async () => {
+    const same = toolsWith({ 'GET /list': listed() }, liveLocal());
+    same.users.set('work', '1234567_SB2', 'support_user@example.com');
+    expect(await same.tools.popupOpen({ account: '1234567_SB2' }, 'work')).toMatchObject({
+      ok: true,
+      action: 'opened',
+    });
+    const other = toolsWith({ 'GET /list': listed() }, liveLocal());
+    other.users.set('work', '1234567_SB2', 'someone.else@example.com');
+    expect(await other.tools.popupOpen({ account: '1234567_SB2' }, 'work')).toEqual({
+      ok: false,
+      code: 'other_user',
+    });
+    const unknown = toolsWith({ 'GET /list': listed() }, liveLocal());
+    expect(await unknown.tools.popupOpen({ account: '1234567_SB2' }, 'work')).toEqual({
+      ok: false,
+      code: 'could_not_check',
+    });
+    for (const h of [same, other, unknown]) expect(h.browser.written).toHaveLength(0);
+  });
+
+  test('open: a live local session of another user (tab) is refused', async () => {
+    const { tools, browser } = toolsWith(
+      { 'GET /list': listed() },
+      liveLocal({ identity: { user: 'someone.else@example.com', role: '3', role_id: 'r' } }),
+    );
+    expect(await tools.popupOpen({ account: '1234567_SB2' }, 'work')).toEqual({
+      ok: false,
+      code: 'other_user',
+    });
+    expect(browser.written).toHaveLength(0);
+  });
+
+  test('open: a probe that cannot tell changes nothing', async () => {
+    const unknown = toolsWith(
+      { 'GET /list': listed(), 'GET /entry': () => ({ status: 200, body: entryBody() }) },
+      liveLocal({ probe: 'unknown' }),
+    );
+    expect(await unknown.tools.popupOpen({ account: '1234567_SB2' }, 'work')).toEqual({
+      ok: false,
+      code: 'could_not_check',
+    });
+    expect(unknown.browser.written).toHaveLength(0);
+  });
+
+  test('open: a dead local session is replaced by the store copy', async () => {
+    const { tools, browser } = toolsWith(
+      { 'GET /list': listed(), 'GET /entry': () => ({ status: 200, body: entryBody() }) },
+      liveLocal({ probe: 'dead' }),
+    );
+    expect(await tools.popupOpen({ account: '1234567_SB2' }, 'work')).toMatchObject({
+      ok: true,
+      action: 'imported',
+    });
+    expect(browser.written).toHaveLength(1);
+  });
+
+  test('open: two live users on one account, the user named in the click is taken', async () => {
+    const entries = [
+      row({ user: 'first@example.com', last_activity: 9 }),
+      row({ user: 'support_user@example.com', last_activity: 1 }),
+    ];
+    const asked: Array<string | null> = [];
+    const { tools } = toolsWith({
+      'GET /list': listed(entries),
+      'GET /entry': (_body, query) => {
+        asked.push(query.get('user'));
+        return { status: 200, body: entryBody() };
+      },
+    });
+    await tools.popupOpen({ account: '1234567_SB2', user: 'Support_User@example.com' }, 'work');
+    expect(asked).toEqual(['support_user@example.com']);
+    const missing = toolsWith({ 'GET /list': listed(entries) });
+    expect(
+      await missing.tools.popupOpen({ account: '1234567_SB2', user: 'nobody@example.com' }, 'work'),
+    ).toEqual({ ok: false, code: 'open_failed' });
+  });
+
+  test('open: no live entry, a bad account and a failed write answer open_failed without values', async () => {
+    const empty = toolsWith({ 'GET /list': listed([]) });
+    expect(await empty.tools.popupOpen({ account: '1234567_SB2' }, 'work')).toEqual({
+      ok: false,
+      code: 'open_failed',
+    });
+    expect(await empty.tools.popupOpen({ account: 'system' }, 'work')).toEqual({
+      ok: false,
+      code: 'open_failed',
+    });
+    const failing = toolsWith(
+      { 'GET /list': listed(), 'GET /entry': () => ({ status: 200, body: entryBody() }) },
+      {},
+      { failWrite: true },
+    );
+    const out = await failing.tools.popupOpen({ account: '1234567_SB2' }, 'work');
+    expect(out).toEqual({ ok: false, code: 'open_failed' });
+    expect(JSON.stringify(out)).not.toContain(SECRET);
+  });
+});
+
+describe('auto_renew on publish', () => {
+  const live = { cookies: [cookie('JSESSIONID', SECRET)], probe: 'alive' as const };
+
+  test('an explicit publish with a checked vault item sends whether it has a TOTP', async () => {
+    for (const totp of [true, false]) {
+      const { tools, store } = toolsWith(
+        { 'POST /entry': () => ({ status: 200, body: { ok: true, stored: true, generation: 1 } }) },
+        live,
+        { totp },
+      );
+      await tools.call(
+        'netsuite_session_publish',
+        { account: '1234567_SB2', vault_item: ITEM },
+        'work',
+      );
+      const sent = store.calls.find((c) => c.route === '/entry')!.body;
+      expect(sent.auto_renew).toBe(totp);
+    }
+  });
+
+  test('left out without a vault item, on a transparent publish, or when bw fails', async () => {
+    const ok = () => ({ status: 200, body: { ok: true, stored: true, generation: 1 } });
+    const plain = toolsWith({ 'POST /entry': ok }, live, { totp: true });
+    await plain.tools.call(
+      'netsuite_session_publish',
+      { account: '1234567_SB2', user: 'a@b.c' },
+      'work',
+    );
+    expect('auto_renew' in plain.store.calls.find((c) => c.route === '/entry')!.body).toBe(false);
+    expect(plain.touched).not.toContain('vaultHasTotp');
+
+    const failing = toolsWith({ 'POST /entry': ok }, live, { totp: 'throw' });
+    await failing.tools.call(
+      'netsuite_session_publish',
+      { account: '1234567_SB2', vault_item: ITEM },
+      'work',
+    );
+    expect('auto_renew' in failing.store.calls.find((c) => c.route === '/entry')!.body).toBe(false);
+
+    const transparent = toolsWith(
+      { 'POST /entry': ok },
+      {
+        ...live,
+        identity: { user: 'a@b.c', role: '3', role_id: 'customrole3' },
+      },
+      { totp: true },
+    );
+    await transparent.tools.publishChanged(normalizeAccount('1234567_SB2')!, 'work', false);
+    expect('auto_renew' in transparent.store.calls.find((c) => c.route === '/entry')!.body).toBe(
+      false,
+    );
+    expect(transparent.touched).not.toContain('vaultHasTotp');
   });
 });

@@ -1,178 +1,209 @@
 <template>
-  <div class="popup-container agent-theme">
-    <!-- Home view -->
-    <div v-show="currentView === 'home'" class="home-view">
-      <div class="header">
-        <div class="header-content">
-          <h1 class="header-title">MokuTab</h1>
-        </div>
+  <div class="popup-shell">
+    <header class="topbar">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+          <rect
+            x="1.5"
+            y="2.5"
+            width="15"
+            height="13"
+            rx="3"
+            stroke="currentColor"
+            stroke-width="1.5"
+          />
+          <path d="M1.5 6.5h15" stroke="currentColor" stroke-width="1.5" />
+          <circle cx="4.5" cy="4.5" r="0.85" fill="currentColor" />
+          <circle cx="7" cy="4.5" r="0.85" fill="currentColor" />
+          <path
+            d="M5.5 9.8l2 1.8-2 1.8M9.2 13.4h3.3"
+            stroke="currentColor"
+            stroke-width="1.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <h1 class="brand-title">{{ getMessage('extensionName') }}</h1>
       </div>
-      <div class="content">
-        <!-- Server configuration card -->
-        <div class="section">
-          <h2 class="section-title">{{ getMessage('nativeServerConfigLabel') }}</h2>
-          <div class="config-card">
-            <div class="status-section">
-              <div class="status-header">
-                <p class="status-label">{{ getMessage('runningStatusLabel') }}</p>
-                <button
-                  class="refresh-status-button"
-                  @click="refreshServerStatus"
-                  :title="getMessage('refreshStatusButton')"
-                >
-                  <RefreshIcon className="icon-small" />
-                </button>
-              </div>
-              <div class="status-info">
-                <span :class="['status-dot', getStatusClass()]"></span>
-                <span class="status-text">{{ getStatusText() }}</span>
-              </div>
-              <div v-if="serverStatus.lastUpdated" class="status-timestamp">
-                {{ getMessage('lastUpdatedLabel') }}
-                {{ new Date(serverStatus.lastUpdated).toLocaleTimeString() }}
-              </div>
-            </div>
 
-            <div v-if="showMcpConfig" class="mcp-config-section">
-              <div
-                class="mcp-config-header"
-                @click="showConfigDetails = !showConfigDetails"
-                style="cursor: pointer"
-              >
-                <p class="mcp-config-label">
-                  {{ getMessage('mcpServerConfigLabel') }}
-                  <span class="chevron-icon" :class="{ expanded: showConfigDetails }">▾</span>
-                </p>
-                <button class="copy-config-button" @click.stop="copyMcpConfig">
-                  {{ copyButtonText }}
-                </button>
-              </div>
-              <Transition name="slide-fade">
-                <div v-show="showConfigDetails" class="mcp-config-content">
-                  <pre class="mcp-config-json">{{ mcpConfigJson }}</pre>
-                </div>
-              </Transition>
-            </div>
-            <div class="port-grid">
-              <div class="port-section">
-                <label for="port" class="port-label">{{ getMessage('connectionPortLabel') }}</label>
-                <input
-                  type="text"
-                  id="port"
-                  :value="nativeServerPort"
-                  @input="updatePort"
-                  class="port-input"
-                />
-              </div>
-              <div class="port-section">
-                <label for="profile" class="port-label">Profile Name</label>
-                <input
-                  type="text"
-                  id="profile"
-                  :value="profileName"
-                  @input="updateProfileName"
-                  class="port-input"
-                  placeholder="e.g. prod, staging, dev"
-                />
-              </div>
-            </div>
+      <button
+        type="button"
+        class="profile-pill"
+        :title="getMessage('profileNameLabel')"
+        @click="settingsOpen = !settingsOpen"
+      >
+        {{ profileName }}
+      </button>
+    </header>
 
-            <button class="connect-button" :disabled="isConnecting" @click="testNativeConnection">
-              <BoltIcon />
-              <span>{{
-                isConnecting
-                  ? getMessage('connectingStatus')
-                  : nativeConnectionStatus === 'connected'
-                    ? getMessage('disconnectButton')
-                    : getMessage('connectButton')
-              }}</span>
-            </button>
+    <main class="main">
+      <!-- Everyday connection summary -->
+      <section class="card connection-card">
+        <div class="connection-left">
+          <span :class="['status-dot', statusDotClass]" aria-hidden="true"></span>
+          <div class="connection-text">
+            <p class="status-text">{{ statusText }}</p>
+            <p v-if="serverStatus.lastUpdated" class="status-time">
+              {{ getMessage('lastUpdatedLabel') }}
+              {{ new Date(serverStatus.lastUpdated).toLocaleTimeString() }}
+            </p>
           </div>
         </div>
 
-        <!-- Module switches: one per machine, kept in the bridge -->
-        <div v-if="modules.length > 0" class="section modules-section">
+        <div class="connection-actions">
+          <button
+            type="button"
+            class="icon-btn"
+            :title="getMessage('refreshStatusButton')"
+            :aria-label="getMessage('refreshStatusButton')"
+            @click="refreshAll"
+          >
+            <RefreshIcon class-name="refresh-svg" />
+          </button>
+
+          <button
+            type="button"
+            class="conn-btn"
+            :class="nativeConnectionStatus === 'connected' ? 'secondary' : 'primary'"
+            :disabled="isConnecting"
+            @click="testNativeConnection"
+          >
+            {{
+              isConnecting
+                ? getMessage('connectingStatus')
+                : nativeConnectionStatus === 'connected'
+                  ? getMessage('disconnectButton')
+                  : getMessage('connectButton')
+            }}
+          </button>
+        </div>
+      </section>
+
+      <!-- Active NetSuite sessions (visible only while NetSuite module is on) -->
+      <NsSessionsSection
+        v-if="isNetsuiteEnabled"
+        :entries="nsSessions"
+        :status="nsSessionsStatus"
+        :now-ms="nowMs"
+        :opening-key="openingNsKey"
+        :row-errors="nsRowErrors"
+        @open="handleOpenNsSession"
+      />
+
+      <!-- Module switches: one per machine, kept in the bridge -->
+      <section v-if="modules.length > 0" class="section">
+        <div class="section-head">
           <h2 class="section-title">{{ getMessage('modulesSectionLabel') }}</h2>
-          <div class="config-card modules-card">
-            <div v-for="module in modules" :key="module.id" class="module-row">
-              <div class="module-text">
-                <p class="module-name">{{ module.title }}</p>
-                <p v-if="module.description" class="module-description">
-                  {{ module.description }}
-                </p>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                class="module-switch"
-                :class="{ on: module.enabled }"
-                :aria-checked="module.enabled"
-                :aria-label="module.title"
-                :disabled="!modulesEditable || savingModule !== null"
-                @click="toggleModule(module)"
-              >
-                <span class="module-switch-knob"></span>
-              </button>
-            </div>
-            <p v-if="modulesNote" class="modules-note">{{ modulesNote }}</p>
-          </div>
         </div>
+
+        <div class="card-group">
+          <div v-for="module in modules" :key="module.id" class="module-row">
+            <div class="module-text">
+              <p class="module-name">{{ module.title }}</p>
+              <p v-if="module.description" class="module-description">
+                {{ module.description }}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              role="switch"
+              class="switch"
+              :class="{ on: module.enabled }"
+              :aria-checked="module.enabled"
+              :aria-label="module.title"
+              :disabled="!modulesEditable || savingModule !== null"
+              @click="toggleModule(module)"
+            ></button>
+          </div>
+
+          <p v-if="modulesNote" class="modules-note">{{ modulesNote }}</p>
+        </div>
+      </section>
+
+      <!-- Collapsible rare settings (port, profile name, MCP config) -->
+      <SettingsSection
+        v-model:open="settingsOpen"
+        :port="nativeServerPort"
+        :profile-name="profileName"
+        :show-mcp-config="showMcpConfig"
+        :mcp-config-json="mcpConfigJson"
+        :copy-label="copyButtonText"
+        @update-port="updatePort"
+        @update-profile="updateProfileName"
+        @copy-config="copyMcpConfig"
+      />
+    </main>
+
+    <footer class="footer">
+      <div class="footer-links">
+        <button
+          type="button"
+          class="footer-link"
+          :title="getMessage('guideLinkTitle')"
+          @click="openWelcomePage"
+        >
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true">
+            <circle cx="8" cy="8" r="6" stroke-width="1.4" />
+            <path d="M8 7.2v3.5M8 5.2h.01" stroke-width="1.5" stroke-linecap="round" />
+          </svg>
+          <span>{{ getMessage('guideLinkLabel') }}</span>
+        </button>
+
+        <button
+          type="button"
+          class="footer-link"
+          :title="getMessage('docsLinkTitle')"
+          @click="openTroubleshooting"
+        >
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true">
+            <path
+              d="M8 3.8C6.6 3 4.8 2.8 3 3.2v9.3c1.8-.4 3.6-.2 5 .6 1.4-.8 3.2-1 5-.6V3.2c-1.8-.4-3.6-.2-5 .6Zm0 0v9.3"
+              stroke-width="1.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          <span>{{ getMessage('docsLinkLabel') }}</span>
+        </button>
       </div>
 
-      <div class="footer">
-        <div class="footer-links">
-          <button class="footer-link" @click="openWelcomePage" title="View installation guide">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-              />
-            </svg>
-            Guide
-          </button>
-          <button class="footer-link" @click="openTroubleshooting" title="Troubleshooting">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"
-              />
-            </svg>
-            Docs
-          </button>
-        </div>
-        <p class="footer-text">browser tools for ai agents</p>
-      </div>
-    </div>
+      <span class="footer-text">{{ getMessage('footerTagline') }}</span>
+    </footer>
   </div>
 </template>
 
 <script lang="ts" setup>
 /**
  * Extension popup UI main component.
- * Allows configuring settings and viewing connection states, including Chrome profile name setup.
+ * Displays connection state, active NetSuite sessions, module switches, and collapsible settings.
  *
  * Author: Roman Chikalenko
- * Version: 1.5.7
+ * Version: 1.6.0
  */
-import { ref, onMounted, onUnmounted, computed } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { BACKGROUND_MESSAGE_TYPES } from '@/common/message-types';
-import { LINKS } from '@/common/constants';
+import { LINKS, NATIVE_HOST, STORAGE_KEYS } from '@/common/constants';
 import { getMessage } from '@/utils/i18n';
-
-import { BoltIcon, RefreshIcon } from './components/icons';
-
-// Current view state: home only.
-const currentView = ref<'home'>('home');
+import { RefreshIcon } from './components/icons';
+import NsSessionsSection from './components/NsSessionsSection.vue';
+import SettingsSection from './components/SettingsSection.vue';
+import {
+  fetchNsSessions,
+  NETSUITE_MODULE_ID,
+  NS_SESSIONS_REFRESH_MS,
+  errorMessageKey,
+  openNsSession,
+  sessionKey,
+  type NsSessionEntry,
+  type RuntimeSender,
+} from './ns-sessions';
 
 const nativeConnectionStatus = ref<'unknown' | 'connected' | 'disconnected'>('unknown');
 const isConnecting = ref(false);
-const nativeServerPort = ref<number>(12306);
+const nativeServerPort = ref<number>(NATIVE_HOST.DEFAULT_PORT);
 const profileName = ref<string>('default');
-const showConfigDetails = ref(false);
+const settingsOpen = ref(false);
 
 const serverStatus = ref<{
   isRunning: boolean;
@@ -187,14 +218,14 @@ const showMcpConfig = computed(() => {
   return nativeConnectionStatus.value === 'connected' && serverStatus.value.isRunning;
 });
 
-const copyButtonText = ref(getMessage('copyConfigButton'));
+const copyButtonText = ref(getMessage('copyShortButton'));
+let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Module switches. The state is the bridge's (one per machine); the background
 // relays reads and writes over its bridge connection.
 interface PopupModule {
   id: string;
   title: string;
-  /** Each module's own one-line description, sent by the background. */
   description?: string;
   enabled: boolean;
 }
@@ -214,10 +245,94 @@ const modulesNote = computed(() => {
   return '';
 });
 
+// Active NetSuite sessions state.
+const isNetsuiteEnabled = computed(() =>
+  modules.value.some((module) => module.id === NETSUITE_MODULE_ID && module.enabled),
+);
+const nsSessions = ref<NsSessionEntry[]>([]);
+const nsSessionsStatus = ref<'loading' | 'ready' | 'unreachable'>('loading');
+const openingNsKey = ref<string | null>(null);
+const nsRowErrors = ref<Record<string, string>>({});
+const nowMs = ref(Date.now());
+let nsRefreshTimer: ReturnType<typeof setInterval> | null = null;
+let nsFetchSeq = 0;
+
+const sendRuntimeMessage: RuntimeSender = (message) => chrome.runtime.sendMessage(message);
+
+const stopNsRefreshTimer = () => {
+  if (nsRefreshTimer !== null) {
+    clearInterval(nsRefreshTimer);
+    nsRefreshTimer = null;
+  }
+};
+
+const loadNsSessions = async (silent = false) => {
+  if (!isNetsuiteEnabled.value) return;
+  const seq = ++nsFetchSeq;
+  if (!silent && nsSessionsStatus.value !== 'ready') {
+    nsSessionsStatus.value = 'loading';
+  }
+  const result = await fetchNsSessions(sendRuntimeMessage);
+  if (seq !== nsFetchSeq || !isNetsuiteEnabled.value) return;
+  nowMs.value = Date.now();
+  nsSessionsStatus.value = result.status;
+  nsSessions.value = result.entries;
+};
+
+watch(
+  isNetsuiteEnabled,
+  (enabled) => {
+    stopNsRefreshTimer();
+    nsFetchSeq++;
+    if (!enabled) {
+      nsSessions.value = [];
+      nsSessionsStatus.value = 'loading';
+      nsRowErrors.value = {};
+      openingNsKey.value = null;
+      return;
+    }
+    void loadNsSessions(false);
+    nsRefreshTimer = setInterval(() => {
+      void loadNsSessions(true);
+    }, NS_SESSIONS_REFRESH_MS);
+  },
+  { immediate: true },
+);
+
+const handleOpenNsSession = async (entry: NsSessionEntry) => {
+  if (openingNsKey.value !== null) return;
+  const key = sessionKey(entry);
+  openingNsKey.value = key;
+  if (nsRowErrors.value[key]) {
+    const nextErrors = { ...nsRowErrors.value };
+    delete nextErrors[key];
+    nsRowErrors.value = nextErrors;
+  }
+  try {
+    const result = await openNsSession(entry.account, entry.user, sendRuntimeMessage);
+    if (!result.ok) {
+      nsRowErrors.value = { ...nsRowErrors.value, [key]: getMessage(errorMessageKey(result.code)) };
+    }
+  } finally {
+    openingNsKey.value = null;
+  }
+};
+
+/**
+ * New module state from the bridge (after a connect, a switch, a push): when
+ * the NetSuite module was on already, its list is reloaded now rather than at
+ * the next 30 s tick (a change of the switch reloads through the watcher).
+ */
+const refreshNsAfterModules = (wasEnabled: boolean) => {
+  if (wasEnabled && isNetsuiteEnabled.value) void loadNsSessions(true);
+};
+
 const applyModulesReply = (reply: any) => {
+  const wasEnabled = isNetsuiteEnabled.value;
   if (Array.isArray(reply?.modules)) modules.value = reply.modules;
   if (reply?.bridge) modulesBridge.value = reply.bridge;
   modulesError.value = reply?.success === false && reply?.error ? String(reply.error) : '';
+  refreshNsAfterModules(wasEnabled);
 };
 
 const loadModules = async () => {
@@ -247,8 +362,8 @@ const toggleModule = async (module: PopupModule) => {
   }
 };
 
-/** A modules_state push the background relayed (a change from any profile). */
 const onModulesChanged = (payload: any) => {
+  const wasEnabled = isNetsuiteEnabled.value;
   const pushed = new Map<string, boolean>();
   for (const entry of Array.isArray(payload?.modules) ? payload.modules : []) {
     if (entry && typeof entry.id === 'string' && typeof entry.enabled === 'boolean') {
@@ -259,6 +374,7 @@ const onModulesChanged = (payload: any) => {
     ...module,
     enabled: pushed.get(module.id) ?? module.enabled,
   }));
+  refreshNsAfterModules(wasEnabled);
 };
 
 const mcpConfigJson = computed(() => {
@@ -274,19 +390,28 @@ const mcpConfigJson = computed(() => {
   return JSON.stringify(config, null, 2);
 });
 
-const getStatusClass = () => {
+const statusDotClass = computed(() => {
+  if (nativeConnectionStatus.value === 'connected') {
+    return serverStatus.value.isRunning ? 'running' : 'idle';
+  }
+  if (nativeConnectionStatus.value === 'disconnected') return 'offline';
+  return 'unknown';
+});
+
+const statusText = computed(() => {
   if (nativeConnectionStatus.value === 'connected') {
     if (serverStatus.value.isRunning) {
-      return 'bg-emerald-500';
-    } else {
-      return 'bg-yellow-500';
+      return getMessage('serviceRunningStatus', [
+        (serverStatus.value.port || 'Unknown').toString(),
+      ]);
     }
-  } else if (nativeConnectionStatus.value === 'disconnected') {
-    return 'bg-red-500';
-  } else {
-    return 'bg-gray-500';
+    return getMessage('connectedServiceNotStartedStatus');
   }
-};
+  if (nativeConnectionStatus.value === 'disconnected') {
+    return getMessage('serviceNotConnectedStatus');
+  }
+  return getMessage('detectingStatus');
+});
 
 async function openWelcomePage() {
   try {
@@ -304,41 +429,24 @@ async function openTroubleshooting() {
   }
 }
 
-const getStatusText = () => {
-  if (nativeConnectionStatus.value === 'connected') {
-    if (serverStatus.value.isRunning) {
-      return getMessage('serviceRunningStatus', [
-        (serverStatus.value.port || 'Unknown').toString(),
-      ]);
-    } else {
-      return getMessage('connectedServiceNotStartedStatus');
-    }
-  } else if (nativeConnectionStatus.value === 'disconnected') {
-    return getMessage('serviceNotConnectedStatus');
-  } else {
-    return getMessage('detectingStatus');
-  }
-};
-
 const updatePort = async (event: Event) => {
   const target = event.target as HTMLInputElement;
-  const newPort = Number(target.value);
-  nativeServerPort.value = newPort;
-
-  await savePortPreference(newPort);
+  const parsed = Number(target.value);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    nativeServerPort.value = parsed;
+    await savePortPreference(parsed);
+  }
 };
 
 const updateProfileName = async (event: Event) => {
   const target = event.target as HTMLInputElement;
   const newName = target.value.trim() || 'default';
   profileName.value = newName;
-
   await saveProfileNamePreference(newName);
 };
 
 const checkNativeConnection = async () => {
   try {
-    // eslint-disable-next-line no-undef
     const response = await chrome.runtime.sendMessage({ type: 'ping_native' });
     nativeConnectionStatus.value = response?.connected ? 'connected' : 'disconnected';
   } catch (error) {
@@ -349,14 +457,12 @@ const checkNativeConnection = async () => {
 
 const checkServerStatus = async () => {
   try {
-    // eslint-disable-next-line no-undef
     const response = await chrome.runtime.sendMessage({
       type: BACKGROUND_MESSAGE_TYPES.GET_SERVER_STATUS,
     });
     if (response?.success && response.serverStatus) {
       serverStatus.value = response.serverStatus;
     }
-
     if (response?.connected !== undefined) {
       nativeConnectionStatus.value = response.connected ? 'connected' : 'disconnected';
     }
@@ -367,14 +473,12 @@ const checkServerStatus = async () => {
 
 const refreshServerStatus = async () => {
   try {
-    // eslint-disable-next-line no-undef
     const response = await chrome.runtime.sendMessage({
       type: BACKGROUND_MESSAGE_TYPES.REFRESH_SERVER_STATUS,
     });
     if (response?.success && response.serverStatus) {
       serverStatus.value = response.serverStatus;
     }
-
     if (response?.connected !== undefined) {
       nativeConnectionStatus.value = response.connected ? 'connected' : 'disconnected';
     }
@@ -383,22 +487,30 @@ const refreshServerStatus = async () => {
   }
 };
 
+const refreshAll = async () => {
+  await refreshServerStatus();
+  await loadModules();
+  if (isNetsuiteEnabled.value) {
+    await loadNsSessions(true);
+  }
+};
+
 const copyMcpConfig = async () => {
+  if (copyResetTimer) {
+    clearTimeout(copyResetTimer);
+    copyResetTimer = null;
+  }
   try {
     await navigator.clipboard.writeText(mcpConfigJson.value);
-    copyButtonText.value = '✅' + getMessage('configCopiedNotification');
-
-    setTimeout(() => {
-      copyButtonText.value = getMessage('copyConfigButton');
-    }, 2000);
+    copyButtonText.value = getMessage('copiedShortLabel');
   } catch (error) {
     console.error('Failed to copy config:', error);
-    copyButtonText.value = '❌' + getMessage('networkErrorMessage');
-
-    setTimeout(() => {
-      copyButtonText.value = getMessage('copyConfigButton');
-    }, 2000);
+    copyButtonText.value = getMessage('copyFailedShortLabel');
   }
+  copyResetTimer = setTimeout(() => {
+    copyButtonText.value = getMessage('copyShortButton');
+    copyResetTimer = null;
+  }, 2000);
 };
 
 const testNativeConnection = async () => {
@@ -406,23 +518,18 @@ const testNativeConnection = async () => {
   isConnecting.value = true;
   try {
     if (nativeConnectionStatus.value === 'connected') {
-      // eslint-disable-next-line no-undef
       await chrome.runtime.sendMessage({ type: 'disconnect_native' });
       nativeConnectionStatus.value = 'disconnected';
     } else {
-      console.log(`Attempting connection to port: ${nativeServerPort.value}`);
-      // eslint-disable-next-line no-undef
       const response = await chrome.runtime.sendMessage({
         type: 'connectNative',
         port: nativeServerPort.value,
       });
       if (response && response.success) {
         nativeConnectionStatus.value = 'connected';
-        console.log('Connection successful:', response);
         await savePortPreference(nativeServerPort.value);
       } else {
         nativeConnectionStatus.value = 'disconnected';
-        console.error('Connection failed:', response);
       }
     }
   } catch (error) {
@@ -436,9 +543,7 @@ const testNativeConnection = async () => {
 
 const savePortPreference = async (port: number) => {
   try {
-    // eslint-disable-next-line no-undef
-    await chrome.storage.local.set({ nativeServerPort: port });
-    console.log(`Port preference saved: ${port}`);
+    await chrome.storage.local.set({ [STORAGE_KEYS.NATIVE_SERVER_PORT]: port });
   } catch (error) {
     console.error('Failed to save port preference:', error);
   }
@@ -446,11 +551,9 @@ const savePortPreference = async (port: number) => {
 
 const loadPortPreference = async () => {
   try {
-    // eslint-disable-next-line no-undef
-    const result = await chrome.storage.local.get(['nativeServerPort']);
+    const result = await chrome.storage.local.get([STORAGE_KEYS.NATIVE_SERVER_PORT]);
     if (result.nativeServerPort) {
       nativeServerPort.value = result.nativeServerPort;
-      console.log(`Port preference loaded: ${result.nativeServerPort}`);
     }
   } catch (error) {
     console.error('Failed to load port preference:', error);
@@ -459,9 +562,7 @@ const loadPortPreference = async () => {
 
 const saveProfileNamePreference = async (name: string) => {
   try {
-    // eslint-disable-next-line no-undef
-    await chrome.storage.local.set({ profileName: name });
-    console.log(`Profile name preference saved: ${name}`);
+    await chrome.storage.local.set({ [STORAGE_KEYS.PROFILE_NAME]: name });
   } catch (error) {
     console.error('Failed to save profile name preference:', error);
   }
@@ -469,34 +570,28 @@ const saveProfileNamePreference = async (name: string) => {
 
 const loadProfileNamePreference = async () => {
   try {
-    // eslint-disable-next-line no-undef
-    const result = await chrome.storage.local.get(['profileName']);
+    const result = await chrome.storage.local.get([STORAGE_KEYS.PROFILE_NAME]);
     if (result.profileName) {
       profileName.value = result.profileName;
-      console.log(`Profile name preference loaded: ${result.profileName}`);
     }
   } catch (error) {
     console.error('Failed to load profile name preference:', error);
   }
 };
 
+let runtimeMessageListener: ((message: { type?: string; payload?: unknown }) => void) | null = null;
+
 const setupServerStatusListener = () => {
-  // eslint-disable-next-line no-undef
-  const onMessage = (message: { type?: string; payload?: unknown }) => {
-    // Server status changes
+  runtimeMessageListener = (message: { type?: string; payload?: unknown }) => {
     if (message.type === BACKGROUND_MESSAGE_TYPES.SERVER_STATUS_CHANGED && message.payload) {
-      serverStatus.value = message.payload as any;
-      console.log('Server status updated:', message.payload);
-      // The bridge came or went: the module switches follow.
+      serverStatus.value = message.payload as typeof serverStatus.value;
       void loadModules();
     }
     if (message.type === BACKGROUND_MESSAGE_TYPES.MODULES_CHANGED && message.payload) {
       onModulesChanged(message.payload);
     }
   };
-  chrome.runtime.onMessage.addListener(onMessage);
-  // Store reference for cleanup
-  (window as any).__popup_onMessage = onMessage;
+  chrome.runtime.onMessage.addListener(runtimeMessageListener);
 };
 
 onMounted(async () => {
@@ -510,392 +605,241 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  // Clean up runtime message listener
+  stopNsRefreshTimer();
+  if (copyResetTimer) {
+    clearTimeout(copyResetTimer);
+    copyResetTimer = null;
+  }
   try {
-    const msgFn = (window as any).__popup_onMessage;
-    if (msgFn && chrome?.runtime?.onMessage?.removeListener) {
-      chrome.runtime.onMessage.removeListener(msgFn);
+    if (runtimeMessageListener && chrome?.runtime?.onMessage?.removeListener) {
+      chrome.runtime.onMessage.removeListener(runtimeMessageListener);
     }
-  } catch {}
+  } catch {
+    // ignore
+  }
 });
 </script>
 
 <style scoped>
-/* Spring Slide-up Staggered Cascades */
-@keyframes spring-slide-up {
-  from {
-    opacity: 0;
-    transform: translateY(16px) scale(0.97);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-.popup-container {
-  background: rgba(253, 252, 248, 0.35);
-  backdrop-filter: blur(24px) saturate(160%);
-  -webkit-backdrop-filter: blur(24px) saturate(160%);
-  border: 1px solid rgba(217, 119, 87, 0.22);
-  border-radius: 16px;
-  box-shadow:
-    0 10px 30px rgba(217, 119, 87, 0.03),
-    inset 0 1px 0 rgba(255, 255, 255, 0.6);
+.popup-shell {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  font-family: var(--ac-font-sans);
-  height: 100%;
-  transition: all var(--transition-slow);
+  width: 100%;
+  min-height: 220px;
+  background: var(--bg);
+  color: var(--label);
 }
 
-.home-view {
+.topbar {
   display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-
-.header {
-  flex-shrink: 0;
-  padding: 14px 16px 10px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
-  animation: spring-slide-up 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both;
-}
-
-.header-content {
-  display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  height: 40px;
+  padding: 0 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
 }
 
-.header-title {
-  font-size: 16px;
-  font-weight: 700;
-  color: #0f172a;
-  margin: 0;
-  letter-spacing: -0.02em;
-  background: linear-gradient(135deg, #d97757 0%, #c4664a 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
 }
 
-.content {
-  flex-grow: 1;
+.brand-mark {
+  width: 16px;
+  height: 16px;
+  color: var(--accent);
+  flex: none;
+}
+
+.brand-title {
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  color: var(--label);
+}
+
+.profile-pill {
+  max-width: 150px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  background: var(--fill-2);
+  border: 1px solid var(--border);
+  color: var(--label-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.profile-pill:hover {
+  background: var(--fill);
+  color: var(--label);
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   padding: 12px 14px;
-  overflow-y: auto;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
 }
 
-.content::-webkit-scrollbar {
-  display: none;
+.card,
+.card-group {
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.connection-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 11px;
+}
+
+.connection-left {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--r-pill);
+  background: var(--gray);
+  flex: none;
+}
+
+.status-dot.running {
+  background: var(--green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 20%, transparent);
+}
+
+.status-dot.idle {
+  background: var(--orange);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--orange) 20%, transparent);
+}
+
+.status-dot.offline {
+  background: var(--red);
+}
+
+.connection-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.status-text {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--label);
+  line-height: 1.3;
+}
+
+.status-time {
+  font-size: 11px;
+  color: var(--label-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.connection-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-sm);
+  color: var(--label-2);
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--label);
+}
+
+:deep(.refresh-svg) {
+  width: 14px;
+  height: 14px;
+}
+
+.conn-btn {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.conn-btn.primary {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.conn-btn.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.conn-btn.secondary {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--label-2);
+}
+
+.conn-btn.secondary:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  color: var(--label);
 }
 
 .section {
-  margin-bottom: 0px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2px;
 }
 
 .section-title {
   font-size: 11px;
   font-weight: 600;
-  color: #475569;
-  margin-bottom: 8px;
+  color: var(--label-2);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding-left: 2px;
-}
-
-.config-card {
-  background: rgba(255, 255, 255, 0.3);
-  border: 1px solid rgba(217, 119, 87, 0.12);
-  border-radius: 12px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  box-shadow:
-    0 4px 16px rgba(0, 0, 0, 0.02),
-    inset 0 1px 0 rgba(255, 255, 255, 0.6);
-  animation: spring-slide-up 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) 0.05s both;
-}
-
-.status-section {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 4px 2px;
-}
-
-.status-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.status-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: #64748b;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-}
-
-.refresh-status-button {
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 2px;
-  color: #64748b;
-  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-}
-
-.refresh-status-button:hover {
-  background: rgba(0, 0, 0, 0.05);
-  color: #0f172a;
-  transform: scale(1.15) rotate(35deg);
-}
-
-.refresh-status-button:active {
-  transform: scale(0.9) rotate(0deg);
-}
-
-.status-info {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.status-dot {
-  height: 6px;
-  width: 6px;
-  border-radius: 50%;
-  animation: pulse-glow 2s infinite ease-in-out;
-}
-
-@keyframes pulse-glow {
-  0%,
-  100% {
-    transform: scale(1);
-    opacity: 0.85;
-  }
-  50% {
-    transform: scale(1.3);
-    opacity: 1;
-    filter: brightness(1.2);
-  }
-}
-
-.status-dot.bg-emerald-500 {
-  background-color: #10b981;
-  box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
-}
-
-.status-dot.bg-red-500 {
-  background-color: #ef4444;
-  box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
-}
-
-.status-dot.bg-yellow-500 {
-  background-color: #f59e0b;
-  box-shadow: 0 0 6px rgba(245, 158, 11, 0.4);
-}
-
-.status-dot.bg-gray-500 {
-  background-color: #9ca3af;
-  box-shadow: 0 0 6px rgba(156, 163, 175, 0.4);
-}
-
-.status-text {
-  font-size: 13px;
-  font-weight: 600;
-  color: #0f172a;
-}
-
-.status-timestamp {
-  font-size: 10px;
-  color: #64748b;
-  margin-top: 2px;
-}
-
-.mcp-config-section {
-  border-top: 1px solid rgba(0, 0, 0, 0.05);
-  padding-top: 12px;
-}
-
-.mcp-config-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 6px;
-}
-
-.mcp-config-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: #64748b;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-  display: flex;
-  align-items: center;
-}
-
-.chevron-icon {
-  display: inline-block;
-  font-size: 10px;
-  margin-left: 4px;
-  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  color: #64748b;
-}
-
-.chevron-icon.expanded {
-  transform: rotate(180deg);
-}
-
-.copy-config-button {
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 11px;
-  color: #475569;
-  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  border: 1px solid rgba(0, 0, 0, 0.08);
-}
-
-.copy-config-button:hover {
-  background: rgba(0, 0, 0, 0.05);
-  color: #0f172a;
-  border-color: rgba(0, 0, 0, 0.15);
-  transform: translateY(-1px) scale(1.03);
-}
-
-.copy-config-button:active {
-  transform: translateY(0) scale(0.96);
-}
-
-/* Vue Dropdown slide-fade spring transition */
-.slide-fade-enter-active,
-.slide-fade-leave-active {
-  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  max-height: 120px;
-  overflow: hidden;
-}
-
-.slide-fade-enter-from,
-.slide-fade-leave-to {
-  transform: translateY(-8px);
-  opacity: 0;
-  max-height: 0 !important;
-  padding-top: 0 !important;
-  padding-bottom: 0 !important;
-  margin-top: 0 !important;
-  border-color: transparent !important;
-}
-
-.mcp-config-content {
-  background: rgba(0, 0, 0, 0.03);
-  border: 1px solid rgba(0, 0, 0, 0.05);
-  border-radius: 8px;
-  padding: 8px;
-  max-height: 120px;
-  overflow: hidden;
-}
-
-.mcp-config-json {
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-  font-size: 10px;
-  line-height: 1.4;
-  color: #1e293b;
-  margin: 0;
-  white-space: pre;
-}
-
-.port-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-
-.port-section {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.port-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: #475569;
-}
-
-.port-input {
-  display: block;
-  width: 100%;
-  border-radius: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: rgba(255, 255, 255, 0.6);
-  color: #0f172a;
-  padding: 8px 10px;
-  font-size: 13px;
-  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
-  box-sizing: border-box;
-}
-
-.port-input:focus {
-  outline: none;
-  border-color: rgba(79, 70, 229, 0.5);
-  background: #ffffff;
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
-  transform: scale(1.02);
-}
-
-.connect-button {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  background: linear-gradient(135deg, #d97757 0%, #c4664a 100%);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  color: #ffffff;
-  font-weight: 600;
-  padding: 10px 14px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  font-size: 13px;
-  box-shadow: 0 4px 14px rgba(217, 119, 87, 0.2);
-  margin-top: 4px;
-}
-
-.connect-button:hover:not(:disabled) {
-  background: linear-gradient(135deg, #c4664a 0%, #b4583c 100%);
-  box-shadow: 0 6px 20px rgba(217, 119, 87, 0.35);
-  transform: translateY(-1.5px) scale(1.02);
-}
-
-.connect-button:active:not(:disabled) {
-  transform: translateY(0) scale(0.96);
-}
-
-.connect-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.modules-section {
-  margin-top: 14px;
-}
-
-.modules-card {
-  gap: 10px;
-  animation-delay: 0.1s;
+  letter-spacing: 0.04em;
 }
 
 .module-row {
@@ -903,146 +847,118 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 2px;
+  padding: 9px 11px;
+}
+
+.module-row + .module-row {
+  border-top: 1px solid var(--border);
 }
 
 .module-text {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
 }
 
 .module-name {
   font-size: 13px;
-  font-weight: 600;
-  color: #0f172a;
-  margin: 0;
+  font-weight: 500;
+  color: var(--label);
 }
 
 .module-description {
-  font-size: 11px;
-  color: #64748b;
-  margin: 0;
+  font-size: 11.5px;
+  color: var(--label-2);
   line-height: 1.35;
 }
 
-.module-switch {
+.switch {
   position: relative;
-  flex-shrink: 0;
-  width: 34px;
-  height: 20px;
-  border-radius: 999px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: rgba(100, 116, 139, 0.25);
-  cursor: pointer;
-  padding: 0;
-  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  width: 32px;
+  height: 18px;
+  border-radius: var(--r-pill);
+  background: var(--border-strong);
+  flex: none;
+  transition: background 140ms ease;
 }
 
-.module-switch.on {
-  background: linear-gradient(135deg, #d97757 0%, #c4664a 100%);
-  border-color: rgba(255, 255, 255, 0.2);
-  box-shadow: 0 2px 8px rgba(217, 119, 87, 0.25);
-}
-
-.module-switch-knob {
+.switch::after {
+  content: '';
   position: absolute;
   top: 2px;
   left: 2px;
   width: 14px;
   height: 14px;
-  border-radius: 50%;
+  border-radius: var(--r-pill);
   background: #ffffff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+  transition: transform 140ms ease;
 }
 
-.module-switch.on .module-switch-knob {
+.switch.on {
+  background: var(--accent);
+}
+
+.switch.on::after {
   transform: translateX(14px);
 }
 
-.module-switch:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.2);
-}
-
-.module-switch:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .modules-note {
-  font-size: 10px;
-  color: #64748b;
-  margin: 0;
-  padding: 0 2px;
-  line-height: 1.4;
-}
-
-:deep(.icon-small) {
-  width: 14px;
-  height: 14px;
-}
-
-:deep(svg) {
-  width: 14px;
-  height: 14px;
+  padding: 7px 11px;
+  border-top: 1px solid var(--border);
+  background: var(--fill-2);
+  font-size: 11px;
+  color: var(--label-2);
+  line-height: 1.38;
 }
 
 .footer {
-  padding: 12px;
-  margin-top: auto;
-  border-top: 1px solid rgba(0, 0, 0, 0.05);
-  background: rgba(255, 255, 255, 0.2);
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 6px;
-  animation: spring-slide-up 0.55s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 14px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
 }
 
 .footer-links {
   display: flex;
-  justify-content: center;
-  gap: 12px;
+  align-items: center;
+  gap: 4px;
 }
 
 .footer-link {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 4px;
-  background: none;
-  border: none;
-  color: #475569;
-  font-size: 11px;
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: 6px;
-  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  height: 24px;
+  padding: 0 7px;
+  border-radius: var(--r-sm);
+  color: var(--label-2);
+  font-size: 11.5px;
+  font-weight: 500;
+  transition:
+    background 120ms ease,
+    color 120ms ease;
 }
 
 .footer-link:hover {
-  color: #4f46e5;
-  background: rgba(0, 0, 0, 0.03);
-  transform: translateY(-0.5px);
-}
-
-.footer-link:active {
-  transform: translateY(0);
+  background: var(--surface-2);
+  color: var(--label);
 }
 
 .footer-link svg {
-  width: 12px;
-  height: 12px;
+  width: 13px;
+  height: 13px;
+  flex: none;
 }
 
 .footer-text {
-  text-align: center;
-  font-size: 10px;
-  color: #64748b;
-  margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  font-size: 10.5px;
+  color: var(--label-3);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 </style>

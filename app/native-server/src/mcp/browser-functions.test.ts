@@ -475,6 +475,9 @@ describe('vault values', () => {
         reads.push(`${item}:${field}`);
         return 's3cr3t-pass';
       },
+      async hasTotp() {
+        return false;
+      },
     };
     deps.vault = vault;
   });
@@ -537,6 +540,9 @@ describe('vault values', () => {
         return [{ uri: 'https://other.example.org', match: null }];
       },
       async get() {
+        throw new Error('must not be read');
+      },
+      async hasTotp() {
         throw new Error('must not be read');
       },
     };

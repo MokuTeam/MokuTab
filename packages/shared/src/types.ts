@@ -47,6 +47,10 @@ export enum NativeMessageType {
   NS_LOGIN_LANDING = 'ns_login_landing',
   NS_ACTIVITY = 'ns_activity',
   NS_SESSION_ENDING = 'ns_session_ending',
+  // Extension -> bridge: the popup's NetSuite sessions list and its open action
+  // (metadata only; the import happens between the bridge and the extension).
+  NS_POPUP_LIST = 'ns_popup_list',
+  NS_POPUP_OPEN = 'ns_popup_open',
 }
 
 /** One installed module and whether it is on, as the bridge reports it. */
