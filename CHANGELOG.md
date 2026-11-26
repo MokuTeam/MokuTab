@@ -4,7 +4,7 @@ All notable changes to MokuTab, called WorkatoMCP before 2.0. Versions refer to 
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. Dates are the commit dates of the corresponding release.
 
-## Unreleased
+## bridge 2.4.1 · shared 2.4.1 (2026-11-26)
 
 ### Fixed
 
