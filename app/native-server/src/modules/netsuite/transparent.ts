@@ -47,6 +47,8 @@ export function targetUrl(host: string, target: unknown): string {
 export class NsTransparent {
   private readonly imports = new Map<string, { fp: string; at: number; retried: boolean }>();
   private readonly touches = new Map<string, number>();
+  /** Per profile, host and tab: when a tab was last sent on because the session was live. */
+  private readonly liveNavigations = new Map<string, number>();
 
   constructor(
     private readonly tools: NsSessionTools,
@@ -62,15 +64,25 @@ export class NsTransparent {
     return account;
   }
 
-  /** A live session is already there: a tab just goes on to its target. */
-  private alreadyLive(account: NsAccount, payload: any): Json {
-    return payload?.kind === 'tab'
-      ? {
-          action: 'navigate',
-          url: targetUrl(account.host, payload?.target),
-          reason: 'already_live',
-        }
-      : { action: 'none', reason: 'already_live' };
+  /**
+   * A live session is already there: a tab just goes on to its target, once
+   * per tab in IMPORT_GUARD_MS (a page that keeps coming back to the login
+   * form is not sent on in a loop).
+   */
+  private alreadyLive(account: NsAccount, payload: any, profile: string): Json {
+    if (payload?.kind !== 'tab') return { action: 'none', reason: 'already_live' };
+    const key = `${profile}|${account.host}|${String(payload?.tab_id ?? '')}`;
+    const now = this.deps.now();
+    const last = this.liveNavigations.get(key);
+    if (last !== undefined && now - last < IMPORT_GUARD_MS) {
+      return { action: 'none', reason: 'loop_guard' };
+    }
+    this.liveNavigations.set(key, now);
+    return {
+      action: 'navigate',
+      url: targetUrl(account.host, payload?.target),
+      reason: 'already_live',
+    };
   }
 
   /** ns_session_changed {host, after_login?}: publish the new session (user from the tab only). */
@@ -106,7 +118,7 @@ export class NsTransparent {
     let bounced = false;
     if (local) {
       const state = await this.tools.probe(account, profile);
-      if (state === 'alive') return this.alreadyLive(account, payload);
+      if (state === 'alive') return this.alreadyLive(account, payload, profile);
       if (state === 'unknown') return { action: 'none', reason: 'probe_unknown' };
       // Dead. The session this guard just imported: report it, once.
       if (last && now - last.at < IMPORT_GUARD_MS) {
@@ -119,7 +131,7 @@ export class NsTransparent {
       return { action: 'none', reason: 'loop_guard' };
     }
     const result = await this.tools.ensureExpected(account, profile);
-    if (result.state === 'already_live') return this.alreadyLive(account, payload);
+    if (result.state === 'already_live') return this.alreadyLive(account, payload, profile);
     if (result.state !== 'imported' || (bounced && result.fp === last?.fp)) {
       return { action: 'none', reason: String(result.state ?? 'error') };
     }
@@ -148,7 +160,12 @@ export class NsTransparent {
       const published = await this.tools.publishChanged(account, profile, false);
       return { state: 'published', publish: published.state ?? 'error' };
     }
-    return { state: matched === true ? 'touched' : 'no_session' };
+    if (matched === true) {
+      // Published earlier without its user: complete it once a tab tells who.
+      const completed = await this.tools.completeUser(account, profile).catch(() => false);
+      return completed ? { state: 'touched', completed_user: true } : { state: 'touched' };
+    }
+    return { state: 'no_session' };
   }
 
   /**

@@ -760,8 +760,8 @@ describe('transparent mode (bridge)', () => {
       entries: [] as any[],
     };
     const routes: Parameters<typeof fakeStore>[0] = {
-      'GET /entry': () =>
-        s.entry && s.entry.live
+      'GET /entry': (_body, query) =>
+        s.entry && s.entry.live && (!query.get('user') || query.get('user') === s.entry.user)
           ? {
               status: 200,
               body: entryBody({
@@ -823,6 +823,9 @@ describe('transparent mode (bridge)', () => {
   ) {
     const { s, routes } = statefulStore();
     const t = toolsWith(routes, browser, { tokenMissing: opts.tokenMissing });
+    /** What another machine asking for this user would get. */
+    const byUser = (user: string) =>
+      routes['GET /entry'](undefined, new URLSearchParams({ account: '1234567_SB2', user })).status;
     if (opts.remembered !== null) t.users.set('work', '1234567_SB2', opts.remembered ?? USER);
     let now = Date.parse('2026-11-26T15:00:00Z');
     const tr = new NsTransparent(t.tools, { isOn: () => !opts.off, now: () => now });
@@ -836,7 +839,7 @@ describe('transparent mode (bridge)', () => {
         live: true,
       };
     };
-    return { ...t, tr, s, remote, advance: (ms: number) => (now += ms) };
+    return { ...t, tr, s, remote, byUser, advance: (ms: number) => (now += ms) };
   }
   const leak = (values: unknown[]) => {
     const text = JSON.stringify(values);
@@ -983,12 +986,14 @@ describe('transparent mode (bridge)', () => {
     expect(off.store.calls).toEqual([]);
   });
 
-  test('a changed session: user from the tab only (null without one, never the remembered user); login_at only after a login', async () => {
+  test('a changed session: user from the tab only (null after 30 s without one, never the remembered user); login_at only after a login', async () => {
     const t = setup(
       { cookies: [cookie('JSESSIONID', SECRET)], identity: null },
       { remembered: 'someone.else@example.com' },
     );
     expect(await t.tr.onChanged({ host: HOST }, 'work')).toEqual({ state: 'published' });
+    // It waited for a tab: 10 polls of 3 s.
+    expect(t.sleeps).toEqual(Array(10).fill(3_000));
     const first = t.store.calls.find((c) => c.route === '/entry')!;
     expect(first.body.user).toBeNull();
     expect(first.body.login_at).toBeNull();
@@ -998,6 +1003,59 @@ describe('transparent mode (bridge)', () => {
     const second = t.store.calls.filter((c) => c.route === '/entry')[1];
     expect(second.body.user).toBe('tab.user@example.com');
     expect(typeof second.body.login_at).toBe('number');
+  });
+
+  test('a tab that tells the user while the publish waits: the session is stored with it', async () => {
+    const t = setup({ cookies: [cookie('JSESSIONID', SECRET)], identity: null });
+    let polls = 0;
+    const real = (t.tools as any).deps.tabIdentity;
+    (t.tools as any).deps.tabIdentity = async (...a: any[]) =>
+      ++polls >= 3 ? { user: USER, role: '3', role_id: 'x' } : real(...a);
+    await t.tr.onChanged({ host: HOST }, 'work');
+    expect(t.sleeps).toEqual([3_000, 3_000]);
+    expect(t.s.entry?.user).toBe(USER);
+  });
+
+  test('a session stored without its user is completed on activity once a tab tells who', async () => {
+    const t = setup(
+      { cookies: [cookie('JSESSIONID', SECRET)], identity: null },
+      { remembered: null },
+    );
+    await t.tr.onChanged({ host: HOST }, 'work');
+    expect(t.s.entry?.user).toBeNull();
+    // Another machine asking for this user finds nothing yet.
+    expect(t.byUser(USER)).toBe(404);
+    t.browser.identity = { user: USER, role: '3', role_id: 'x' };
+    expect(await t.tr.onActivity({ host: HOST }, 'work')).toEqual({
+      state: 'touched',
+      completed_user: true,
+    });
+    expect(t.s.entry?.user).toBe(USER);
+    expect(t.byUser(USER)).toBe(200);
+    expect(t.users.get('work', '1234567_SB2')).toBe(USER);
+    // Done once: the next touch does not publish again.
+    t.advance(TOUCH_EVERY_MS + 1);
+    const before = t.store.calls.filter((c) => c.route === '/entry').length;
+    expect(await t.tr.onActivity({ host: HOST }, 'work')).toEqual({ state: 'touched' });
+    expect(t.store.calls.filter((c) => c.route === '/entry')).toHaveLength(before);
+  });
+
+  test('already_live sends a tab on once a minute; a second time is the loop guard, another tab still goes', async () => {
+    const t = setup({ cookies: [cookie('JSESSIONID', SECRET)], probe: 'alive' });
+    t.remote();
+    const first = await t.tr.onLanding({ host: HOST, kind: 'tab', tab_id: 7 }, 'work');
+    expect(first.action).toBe('navigate');
+    expect(await t.tr.onLanding({ host: HOST, kind: 'tab', tab_id: 7 }, 'work')).toEqual({
+      action: 'none',
+      reason: 'loop_guard',
+    });
+    expect((await t.tr.onLanding({ host: HOST, kind: 'tab', tab_id: 8 }, 'work')).action).toBe(
+      'navigate',
+    );
+    t.advance(IMPORT_GUARD_MS + 1);
+    expect((await t.tr.onLanding({ host: HOST, kind: 'tab', tab_id: 7 }, 'work')).action).toBe(
+      'navigate',
+    );
   });
 
   test('activity: one touch per 2 minutes; a miss publishes only when no other machine has a live entry', async () => {

@@ -24,6 +24,9 @@ export const LOCK_POLL_MS = 3_000;
 export const MAX_LOCK_WAIT_MS = 110_000;
 /** A checked vault username is reused this long (names only, never a password). */
 export const VAULT_USER_TTL_MS = 10 * 60 * 1000;
+/** A transparent publish waits this long for an open tab to tell the user, polling every 3 s. */
+export const IDENTITY_WAIT_MS = 30_000;
+export const IDENTITY_POLL_MS = 3_000;
 
 function uriHost(uri: string): string | null {
   try {
@@ -182,6 +185,9 @@ export class NsSessionTools {
     this.runIds.set(key, made);
     return made;
   }
+
+  /** Per profile and host: the fp last published without a user (filled in by completeUser). */
+  private readonly userless = new Map<string, string>();
 
   /** Checked vault usernames by item and host, with when they were read. */
   private readonly vaultUsers = new Map<string, { user: string | null; at: number }>();
@@ -402,6 +408,27 @@ export class NsSessionTools {
         code: err instanceof ToolRefusal ? err.code : 'NetSuiteSessionError',
       };
     }
+  }
+
+  /**
+   * The profile's session was published without a user (no open tab then).
+   * Once a tab tells the user, publish the same session again: the store
+   * merges the user into the entry, so other machines can find it by user and
+   * this profile remembers it. True when it published.
+   */
+  async completeUser(account: NsAccount, profile: string): Promise<boolean> {
+    const key = `${profile}|${account.host}`;
+    const pending = this.userless.get(key);
+    if (!pending) return false;
+    const fp = await this.localFingerprint(account, profile).catch(() => null);
+    if (fp !== pending) {
+      this.userless.delete(key);
+      return false;
+    }
+    const identity = await this.deps.tabIdentity(profile, account.host).catch(() => null);
+    if (!identity?.user) return false;
+    const result = await this.publishChanged(account, profile, false);
+    return result.state === 'published' || result.state === 'unchanged';
   }
 
   /** Whether the profile's session for the host is logged in (alive, dead or unknown). */
@@ -664,7 +691,16 @@ export class NsSessionTools {
       };
     }
     // The tab's user first; with a vault item too, both must be the same user.
-    const identity = await this.deps.tabIdentity(profile, account.host).catch(() => null);
+    let identity = await this.deps.tabIdentity(profile, account.host).catch(() => null);
+    if (args.transparent === true) {
+      // A tab right after a login may still be loading: wait for it a while
+      // rather than store a session without its user.
+      for (let waited = 0; !identity?.user && waited < IDENTITY_WAIT_MS; ) {
+        await this.deps.sleep(IDENTITY_POLL_MS);
+        waited += IDENTITY_POLL_MS;
+        identity = await this.deps.tabIdentity(profile, account.host).catch(() => null);
+      }
+    }
     const tabUser = identity?.user ? identity.user.trim().toLowerCase() : null;
     const fromVault = await this.vaultUser(args.vault_item, account);
     if (tabUser && fromVault && tabUser !== fromVault) {
@@ -724,6 +760,10 @@ export class NsSessionTools {
       throw new ToolRefusal(answer.code, `the store refused the publish (${answer.status})`);
     }
     if (who.user) this.deps.users.set(profile, account.account, who.user);
+    // A session stored without its user is filled in later (completeUser).
+    const key = `${profile}|${account.host}`;
+    if (who.user) this.userless.delete(key);
+    else this.userless.set(key, fp);
     return {
       state: bodyOf(answer)?.stored === false ? 'unchanged' : 'published',
       account: account.account,
