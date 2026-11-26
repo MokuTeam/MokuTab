@@ -1,7 +1,6 @@
 import { createApp } from 'vue';
 import { NativeMessageType } from '@mokuhub/mokutab-shared';
 import './style.css';
-import '@/entrypoints/styles/theme.css';
 import App from './App.vue';
 
 // Trigger ensure native connection (fire-and-forget, don't block UI mounting)

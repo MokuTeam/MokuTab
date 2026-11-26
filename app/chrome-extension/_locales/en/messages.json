@@ -61,6 +61,18 @@
     "message": "Connection Port",
     "description": "Connection port input label"
   },
+  "profileNameLabel": {
+    "message": "Profile Name",
+    "description": "Profile name input label"
+  },
+  "profileNamePlaceholder": {
+    "message": "e.g. prod, staging, dev",
+    "description": "Profile name input placeholder"
+  },
+  "settingsSectionLabel": {
+    "message": "Settings",
+    "description": "Collapsible settings section header"
+  },
   "refreshStatusButton": {
     "message": "Refresh Status",
     "description": "Refresh status button tooltip"
@@ -68,6 +80,18 @@
   "copyConfigButton": {
     "message": "Copy Configuration",
     "description": "Copy configuration button text"
+  },
+  "copyShortButton": {
+    "message": "Copy",
+    "description": "Compact copy button label"
+  },
+  "copiedShortLabel": {
+    "message": "Copied",
+    "description": "Compact copied state label"
+  },
+  "copyFailedShortLabel": {
+    "message": "Failed",
+    "description": "Compact copy error label"
   },
   "networkErrorMessage": {
     "message": "Network connection error, please check network and retry",
@@ -89,6 +113,10 @@
     "message": "Recipes, jobs, connections, tables and Workflow App pages in Workato.",
     "description": "One-line description of the Workato module in the popup"
   },
+  "moduleDescription_netsuite": {
+    "message": "NetSuite sessions shared between machines through the session store.",
+    "description": "One-line description of the NetSuite module in the popup"
+  },
   "modulesBridgeOffNote": {
     "message": "Connect to the bridge to change modules. The switch applies to every Chrome profile on this machine.",
     "description": "Shown under the module switches while the bridge is not connected"
@@ -106,5 +134,63 @@
         "example": "the bridge connection closed"
       }
     }
+  },
+  "nsSessionsSectionLabel": {
+    "message": "NetSuite sessions",
+    "description": "Popup section header for active NetSuite sessions"
+  },
+  "nsSessionsLoading": {
+    "message": "Checking sessions...",
+    "description": "Shown while fetching NetSuite sessions"
+  },
+  "nsSessionsEmpty": {
+    "message": "No active sessions",
+    "description": "Shown when no live NetSuite sessions are in the store"
+  },
+  "nsSessionsUnreachable": {
+    "message": "Session store not reachable",
+    "description": "Shown when the NetSuite session store does not answer or returns an error"
+  },
+  "nsSessionStateLive": {
+    "message": "live",
+    "description": "Badge label for a live NetSuite session"
+  },
+  "nsSessionStateDying": {
+    "message": "dying",
+    "description": "Badge label for a dying NetSuite session"
+  },
+  "nsSessionOpenFailed": {
+    "message": "Could not open session",
+    "description": "Fallback error shown when opening a NetSuite session tab fails"
+  },
+  "nsSessionOpenTooltip": {
+    "message": "Open $ACCOUNT$ in a new tab",
+    "description": "Tooltip for clicking a NetSuite session row",
+    "placeholders": {
+      "account": {
+        "content": "$1",
+        "example": "1234567_SB2"
+      }
+    }
+  },
+  "guideLinkLabel": {
+    "message": "Guide",
+    "description": "Footer link label for installation guide"
+  },
+  "guideLinkTitle": {
+    "message": "View installation guide",
+    "description": "Footer link tooltip for installation guide"
+  },
+  "docsLinkLabel": {
+    "message": "Docs",
+    "description": "Footer link label for troubleshooting docs"
+  },
+  "docsLinkTitle": {
+    "message": "Troubleshooting",
+    "description": "Footer link tooltip for troubleshooting docs"
+  },
+  "footerTagline": {
+    "message": "browser tools for ai agents",
+    "description": "Short tagline shown in popup footer"
   }
 }
