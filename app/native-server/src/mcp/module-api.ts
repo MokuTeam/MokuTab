@@ -145,4 +145,11 @@ export interface BridgeModule {
     ctx: ModuleCallContext,
   ): Promise<CallToolResult> | undefined;
   session?: ModuleSessionHooks;
+  /**
+   * Requests the extension sends this module on its own (not tool calls), by
+   * message type, answered over the extension connection with the profile
+   * they came from. Registered by the running bridge; refused while the
+   * module is off.
+   */
+  extensionRequests?: Readonly<Record<string, (payload: any, profile: string) => unknown>>;
 }

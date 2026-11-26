@@ -33,6 +33,15 @@ export class ExpectedUsers {
     return typeof user === 'string' && user ? user : null;
   }
 
+  /** Every account this profile expects a user for: {account: user}. */
+  all(profile: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [account, entry] of Object.entries(this.read()[profile] ?? {})) {
+      if (typeof entry?.user === 'string' && entry.user) out[account] = entry.user;
+    }
+    return out;
+  }
+
   set(profile: string, account: string, user: string): void {
     const doc = this.read();
     const current = doc[profile]?.[account]?.user;

@@ -122,3 +122,43 @@ describe('the module switch over the extension connection', () => {
     expect(switches.isEnabled('workato')).toBe(true);
   });
 });
+
+describe('requests a module takes from the extension', () => {
+  test('answered with the profile they came from, and refused while the module is off', async () => {
+    const seen: Array<{ payload: any; profile: string }> = [];
+    const local = new ProfileRegistry();
+    const undoLocal = installModuleSync({
+      registry: local,
+      switches,
+      modules: [
+        {
+          id: 'workato',
+          title: 'Workato',
+          extensionRequests: {
+            demo_report: (payload: any, profile: string) => {
+              seen.push({ payload, profile });
+              return { state: 'ok' };
+            },
+          },
+        },
+      ],
+    });
+    const socket = new FakeSocket();
+    local.register('work', socket);
+    socket.fromExtension({ type: 'demo_report', requestId: 'q1', payload: { host: 'h' } });
+    await flush();
+    expect(socket.sent.find((m) => m.responseToRequestId === 'q1')?.payload).toEqual({
+      status: 'success',
+      data: { state: 'ok' },
+    });
+    expect(seen).toEqual([{ payload: { host: 'h' }, profile: 'work' }]);
+
+    switches.set('workato', false);
+    socket.fromExtension({ type: 'demo_report', requestId: 'q2', payload: { host: 'h' } });
+    await flush();
+    const refused = socket.sent.find((m) => m.responseToRequestId === 'q2');
+    expect(refused?.payload.status).toBe('error');
+    expect(seen).toHaveLength(1);
+    undoLocal();
+  });
+});

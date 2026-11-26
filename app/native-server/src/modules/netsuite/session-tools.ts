@@ -220,7 +220,7 @@ export class NsSessionTools {
     if (early) return early;
     switch (name) {
       case T.STATUS:
-        return this.status(account);
+        return this.status(account, this.softProfile(profile));
       case T.ENSURE:
         return this.ensure(account!, args, this.profile(profile), secrets);
       case T.PUBLISH:
@@ -257,6 +257,13 @@ export class NsSessionTools {
       'ProfileRequired',
       `${connected.length} Chrome profiles are connected (${connected.join(', ')}): pass profile`,
     );
+  }
+
+  /** The profile for a read that does not need one: named, pinned or the only connected. */
+  private softProfile(profile: string | null): string | null {
+    if (profile) return profile;
+    const connected = this.deps.connectedProfiles();
+    return connected.length === 1 ? connected[0] : null;
   }
 
   /**
@@ -321,7 +328,7 @@ export class NsSessionTools {
     return holder?.machine === this.deps.machine && holder?.profile === profile;
   }
 
-  async status(account: NsAccount | null): Promise<Json> {
+  async status(account: NsAccount | null, profile: string | null = null): Promise<Json> {
     const answer = await this.deps.store.request('GET', '/list', {
       query: { account: account?.account },
     });
@@ -332,7 +339,107 @@ export class NsSessionTools {
     }
     const listed = bodyOf(answer)?.entries;
     const entries = Array.isArray(listed) ? listed.map(metadataOnly) : [];
-    return { state: 'ok', ...(account ? { account: account.account } : {}), entries };
+    // Which user this profile takes for each account (names only): the
+    // transparent import follows it, so it is shown, never silent.
+    const expected = profile ? this.deps.users.all(profile) : null;
+    return {
+      state: 'ok',
+      ...(account ? { account: account.account } : {}),
+      entries,
+      ...(profile && expected
+        ? {
+            profile,
+            expected_users: account
+              ? Object.fromEntries(
+                  Object.entries(expected).filter(([acct]) => acct === account.account),
+                )
+              : expected,
+          }
+        : {}),
+    };
+  }
+
+  // Transparent mode (the extension reports a host; values never leave this
+  // process except to the store and back to the extension).
+
+  /** Whether the store can be used now (token present, not backing off). */
+  storeReady(): boolean {
+    return noStoreResult(this.deps.store.precheck()) === null;
+  }
+
+  /** The profile's session changed: publish it; login_at only right after a login. */
+  async publishChanged(account: NsAccount, profile: string, afterLogin: boolean): Promise<Json> {
+    const secrets: string[] = [];
+    try {
+      return await this.publish(account, { login_at: afterLogin }, profile, secrets);
+    } catch (err: any) {
+      return {
+        state: 'error',
+        code: err instanceof ToolRefusal ? err.code : 'NetSuiteSessionError',
+      };
+    }
+  }
+
+  /** Ensure for the profile's expected user (or the only live one): what a login landing runs. */
+  async ensureExpected(account: NsAccount, profile: string): Promise<Json> {
+    const secrets: string[] = [];
+    const remembered = this.deps.users.get(profile, account.account);
+    try {
+      return await this.ensureOnce(
+        account,
+        { user: remembered, source: remembered ? 'remembered' : null },
+        profile,
+        secrets,
+      );
+    } catch (err: any) {
+      return {
+        state: 'error',
+        code: err instanceof ToolRefusal ? err.code : 'NetSuiteSessionError',
+      };
+    }
+  }
+
+  /** The fingerprint of the profile's session cookie for the account, or null. */
+  async localFingerprint(account: NsAccount, profile: string): Promise<string | null> {
+    const cookies = await this.deps.readCookies(profile, account.host);
+    const session = sessionCookie(cookies, account.host);
+    return session && typeof session.value === 'string' ? fingerprint(session.value) : null;
+  }
+
+  /** POST /dead for a fingerprint; true when the store matched it. */
+  async reportDead(
+    account: NsAccount,
+    fp: string,
+    reason: 'login_redirect' | 'import_bounced' | 'switch' | 'logout' | 'expired',
+    profile: string,
+  ): Promise<boolean> {
+    const answer = await this.deps.store.request('POST', '/dead', {
+      body: {
+        account: account.account,
+        fp,
+        reason,
+        where: { machine: this.deps.machine, profile },
+      },
+      profile,
+    });
+    return answer.kind === 'ok' && bodyOf(answer)?.matched === true;
+  }
+
+  /** POST /touch for the profile's session: matched true/false, or null without a session. */
+  async touch(account: NsAccount, profile: string): Promise<boolean | null> {
+    const fp = await this.localFingerprint(account, profile);
+    if (!fp) return null;
+    const answer = await this.deps.store.request('POST', '/touch', {
+      body: {
+        account: account.account,
+        fp,
+        where: { machine: this.deps.machine, profile },
+        at: this.deps.now(),
+      },
+      profile,
+    });
+    if (answer.kind !== 'ok') return null;
+    return bodyOf(answer)?.matched === true;
   }
 
   async ensure(account: NsAccount, args: Json, profile: string, secrets: string[]): Promise<Json> {

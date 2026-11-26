@@ -12,6 +12,7 @@ import {
   type NsDeps,
 } from './session-tools';
 import { NsStoreClient, parseTokenFile, type StoreIo } from './store-client';
+import { IMPORT_GUARD_MS, NsTransparent, TOUCH_EVERY_MS, targetUrl } from './transparent';
 
 const SECRET = 'JSESS-VALUE-0123456789abcdef';
 const OTHER = 'OTHER-COOKIE-VALUE-zyxw9876';
@@ -334,6 +335,9 @@ describe('netsuite_session_* tools', () => {
       state: 'ok',
       account: '1234567_SB2',
       entries: [{ account: '1234567_SB2', fp: 'abcd1234' }],
+      // The only connected profile, and the users it expects (none yet).
+      profile: 'work',
+      expected_users: {},
     });
   });
 
@@ -734,5 +738,215 @@ describe('until and Test Drive ids', () => {
       host: 'tstdrv1234567.app.netsuite.com',
     });
     expect(accountFromHost('tstdrv1234567.app.netsuite.com')?.account).toBe('TSTDRV1234567');
+  });
+});
+
+describe('transparent mode (bridge)', () => {
+  const NEW = 'JSESS-NEWER-SESSION-5555aaaa';
+  function setup(
+    routes: Parameters<typeof fakeStore>[0],
+    browser: Partial<FakeBrowser> = {},
+    opts: { off?: boolean; tokenMissing?: boolean } = {},
+  ) {
+    const t = toolsWith(routes, browser, { tokenMissing: opts.tokenMissing });
+    let now = Date.parse('2026-11-26T15:00:00Z');
+    const tr = new NsTransparent(t.tools, { isOn: () => !opts.off, now: () => now });
+    return { ...t, tr, advance: (ms: number) => (now += ms) };
+  }
+  const leak = (values: unknown[]) => {
+    const text = JSON.stringify(values);
+    expect(text).not.toContain(SECRET);
+    expect(text).not.toContain(OTHER);
+    expect(text).not.toContain(NEW);
+  };
+
+  test('targetUrl keeps a plain path and refuses login pages and other hosts', () => {
+    expect(targetUrl(HOST, '/app/crm/support/supportcase.nl?id=5')).toBe(
+      `https://${HOST}/app/crm/support/supportcase.nl?id=5`,
+    );
+    for (const bad of [
+      undefined,
+      '',
+      '//evil.example/x',
+      'https://evil.example',
+      '/app/login/secure/enterpriselogin.nl',
+    ]) {
+      expect(targetUrl(HOST, bad)).toBe(`https://${HOST}/app/center/card.nl`);
+    }
+  });
+
+  test('a tab landing imports the live session and goes to its target; a fetch landing only imports', async () => {
+    const { tr, store, browser } = setup(
+      { 'GET /entry': () => ({ status: 200, body: entryBody() }) },
+      { cookies: [cookie('JSESSIONID', 'LOGIN-PAGE-COOKIE-111')] },
+    );
+    const tab = await tr.onLanding(
+      { host: HOST, kind: 'tab', target: '/app/center/card.nl?x=1' },
+      'work',
+    );
+    expect(tab).toEqual({
+      action: 'navigate',
+      url: `https://${HOST}/app/center/card.nl?x=1`,
+      fp: fingerprint(SECRET),
+    });
+    expect(browser.written).toHaveLength(1);
+    const other = setup(
+      { 'GET /entry': () => ({ status: 200, body: entryBody() }) },
+      { cookies: [] },
+    );
+    const fetchLanding = await other.tr.onLanding({ host: HOST, kind: 'fetch' }, 'work');
+    expect(fetchLanding).toEqual({ action: 'imported', fp: fingerprint(SECRET) });
+    leak([tab, fetchLanding, store.calls.map((c) => c.route)]);
+  });
+
+  test('loop guard: a second landing within the window is left alone', async () => {
+    const { tr, store, browser, advance } = setup(
+      { 'GET /entry': () => ({ status: 200, body: entryBody() }) },
+      { cookies: [] },
+    );
+    await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
+    browser.cookies = [cookie('JSESSIONID', 'SOMETHING-ELSE-222')];
+    const again = await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
+    expect(again).toEqual({ action: 'none', reason: 'loop_guard' });
+    expect(store.calls.filter((c) => c.route === '/entry')).toHaveLength(1);
+    advance(IMPORT_GUARD_MS + 1);
+    const later = await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
+    expect(later.action).toBe('navigate');
+  });
+
+  test('a bounce reports import_bounced, asks once more, takes a newer session, then stops', async () => {
+    let generation = 1;
+    const { tr, store } = setup(
+      {
+        'GET /entry': () => ({
+          status: 200,
+          body:
+            generation === 1
+              ? entryBody()
+              : entryBody({ generation: 5, cookies: [cookie('JSESSIONID', NEW)] }),
+        }),
+        'POST /dead': () => ({ status: 200, body: { ok: true, matched: true } }),
+      },
+      { cookies: [] },
+    );
+    const first = await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
+    expect(first.action).toBe('navigate');
+    // The imported session landed on the login page again (the cookie is still the imported one).
+    generation = 2;
+    const second = await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
+    const dead = store.calls.find((c) => c.route === '/dead');
+    expect(dead?.body).toEqual({
+      account: '1234567_SB2',
+      fp: fingerprint(SECRET),
+      reason: 'import_bounced',
+      where: { machine: 'laptop', profile: 'work' },
+    });
+    expect(second).toMatchObject({ action: 'navigate', fp: fingerprint(NEW) });
+    // A second bounce in the window: no third import.
+    const third = await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
+    expect(third).toEqual({ action: 'none', reason: 'loop_guard' });
+    leak([first, second, third, dead]);
+  });
+
+  test('a bounce with no newer session leaves the login page alone', async () => {
+    const { tr } = setup(
+      {
+        'GET /entry': () => ({ status: 200, body: entryBody() }),
+        'POST /dead': () => ({ status: 200, body: { ok: true, matched: true } }),
+      },
+      { cookies: [] },
+    );
+    await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
+    const again = await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
+    expect(again.action).toBe('none');
+  });
+
+  test('module off, no store or not an account host: nothing is read or sent', async () => {
+    const off = setup({}, {}, { off: true });
+    expect(await off.tr.onLanding({ host: HOST, kind: 'tab' }, 'work')).toEqual({
+      action: 'none',
+      reason: 'module_off',
+    });
+    const none = setup({}, {}, { tokenMissing: true });
+    expect(await none.tr.onChanged({ host: HOST }, 'work')).toEqual({
+      state: 'skipped',
+      reason: 'no_store',
+    });
+    expect(await none.tr.onActivity({ host: 'system.netsuite.com' }, 'work')).toEqual({
+      state: 'skipped',
+      reason: 'not_an_account_host',
+    });
+    expect(off.touched).toEqual([]);
+    expect(none.touched).toEqual([]);
+    expect(off.store.calls).toEqual([]);
+  });
+
+  test('a changed session is published; login_at only right after a login', async () => {
+    const { tr, store } = setup(
+      { 'POST /entry': () => ({ status: 200, body: { ok: true, stored: true, generation: 2 } }) },
+      {
+        cookies: [cookie('JSESSIONID', SECRET)],
+        identity: { user: 'a@b.c', role: '3', role_id: 'x' },
+      },
+    );
+    expect(await tr.onChanged({ host: HOST }, 'work')).toEqual({ state: 'published' });
+    expect(store.calls[0].body.login_at).toBeNull();
+    await tr.onChanged({ host: HOST, after_login: true }, 'work');
+    expect(typeof store.calls[1].body.login_at).toBe('number');
+  });
+
+  test('activity: one touch per 2 minutes; a session the store does not know is published', async () => {
+    let matched = true;
+    const { tr, store, advance } = setup(
+      {
+        'POST /touch': () => ({ status: 200, body: { ok: true, matched } }),
+        'POST /entry': () => ({ status: 200, body: { ok: true, stored: true } }),
+      },
+      { cookies: [cookie('JSESSIONID', SECRET)] },
+    );
+    expect(await tr.onActivity({ host: HOST }, 'work')).toEqual({ state: 'touched' });
+    expect(await tr.onActivity({ host: HOST }, 'work')).toEqual({ state: 'throttled' });
+    const touch = store.calls.find((c) => c.route === '/touch');
+    expect(touch?.body).toMatchObject({
+      account: '1234567_SB2',
+      fp: fingerprint(SECRET),
+      where: { machine: 'laptop', profile: 'work' },
+    });
+    advance(TOUCH_EVERY_MS + 1);
+    matched = false;
+    expect(await tr.onActivity({ host: HOST }, 'work')).toEqual({
+      state: 'published',
+      publish: 'published',
+    });
+    leak([touch]);
+  });
+
+  test('a switch or a logout reports the local session dead with its reason', async () => {
+    const { tr, store } = setup(
+      { 'POST /dead': () => ({ status: 200, body: { ok: true, matched: true } }) },
+      { cookies: [cookie('JSESSIONID', SECRET)] },
+    );
+    expect(await tr.onEnding({ host: HOST, reason: 'switch' }, 'work')).toEqual({
+      state: 'reported',
+      reason: 'switch',
+    });
+    expect(await tr.onEnding({ host: HOST, reason: 'logout' }, 'work')).toEqual({
+      state: 'reported',
+      reason: 'logout',
+    });
+    expect(store.calls.map((c) => c.body.reason)).toEqual(['switch', 'logout']);
+    const empty = setup({}, { cookies: [] });
+    expect(await empty.tr.onEnding({ host: HOST, reason: 'logout' }, 'work')).toEqual({
+      state: 'no_session',
+    });
+  });
+
+  test('status names the users this profile expects', async () => {
+    const { tools, users } = setup({
+      'GET /list': () => ({ status: 200, body: { ok: true, entries: [] } }),
+    });
+    users.set('work', '1234567_SB2', 'a@b.c');
+    const out = parse(await tools.call('netsuite_session_status', {}, 'work'));
+    expect(out).toMatchObject({ profile: 'work', expected_users: { '1234567_SB2': 'a@b.c' } });
   });
 });

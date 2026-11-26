@@ -41,6 +41,12 @@ export enum NativeMessageType {
   NS_COOKIES_WRITE = 'ns_cookies_write',
   NS_TAB_IDENTITY = 'ns_tab_identity',
   NS_SESSION_PROBE = 'ns_session_probe',
+  // Extension -> bridge, NetSuite module transparent mode. Each carries only a
+  // host (plus a tab id, a target path or a reason), never a cookie value.
+  NS_SESSION_CHANGED = 'ns_session_changed',
+  NS_LOGIN_LANDING = 'ns_login_landing',
+  NS_ACTIVITY = 'ns_activity',
+  NS_SESSION_ENDING = 'ns_session_ending',
 }
 
 /** One installed module and whether it is on, as the bridge reports it. */
