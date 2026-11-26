@@ -160,7 +160,14 @@ function forStore(cookies: NsCookie[]): NsCookie[] {
   return cookies.map(({ hostOnly: _hostOnly, ...rest }) => rest);
 }
 
+function lockKey(account: string, user: string, profile: string): string {
+  return `${account}\u0000${user.toLowerCase()}\u0000${profile}`;
+}
+
 export class NsSessionTools {
+  /** lock_id per (account, user, profile) from the last lock, sent back on unlock. */
+  private readonly lockIds = new Map<string, string>();
+
   /** Checked vault usernames by item and host, with when they were read. */
   private readonly vaultUsers = new Map<string, { user: string | null; at: number }>();
 
@@ -586,6 +593,11 @@ export class NsSessionTools {
       }
       throw new ToolRefusal(answer.code, `the store refused the lock (${answer.status})`);
     }
+    // The lock handle stays in the bridge (never in a result): unlock sends it back.
+    const lockId = bodyOf(answer)?.lock_id;
+    if (typeof lockId === 'string' && lockId) {
+      this.lockIds.set(lockKey(account.account, who.user, profile), lockId);
+    }
     return {
       state: 'locked',
       account: account.account,
@@ -597,8 +609,17 @@ export class NsSessionTools {
   async unlock(account: NsAccount, args: Json, profile: string): Promise<Json> {
     const who = await this.who(args, account, profile);
     if (!who.user) throw new ToolRefusal('UserRequired', 'the unlock needs user or vault_item');
+    const key = lockKey(account.account, who.user, profile);
+    const lockId = this.lockIds.get(key);
+    this.lockIds.delete(key);
+    // Both the handle and the holder: the store matches on whichever it keeps.
     const answer = await this.deps.store.request('POST', '/unlock', {
-      body: { account: account.account, user: who.user, holder: this.holder(profile, args.run_id) },
+      body: {
+        account: account.account,
+        user: who.user,
+        ...(lockId ? { lock_id: lockId } : {}),
+        holder: this.holder(profile, args.run_id),
+      },
       profile,
     });
     const none = noStoreResult(answer, account.account);

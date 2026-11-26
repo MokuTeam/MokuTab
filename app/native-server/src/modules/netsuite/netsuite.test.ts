@@ -245,7 +245,7 @@ function toolsWith(
     },
     vaultUsername: async () => {
       touched.push('vaultUsername');
-      return 'Support_BGC@example.com';
+      return 'Support_User@example.com';
     },
     connectedProfiles: () => opts.profiles ?? ['work'],
     machine: 'laptop',
@@ -270,7 +270,7 @@ const parse = (result: any) => JSON.parse(result.content[0].text);
 const entryBody = (over: any = {}) => ({
   ok: true,
   account: '1234567_SB2',
-  user: 'support_bgc@example.com',
+  user: 'support_user@example.com',
   role: '3',
   generation: 4,
   state: 'live',
@@ -363,11 +363,11 @@ describe('netsuite_session_* tools', () => {
       state: 'imported',
       fp: fingerprint(SECRET),
       cookies_set: 2,
-      user: 'support_bgc@example.com',
+      user: 'support_user@example.com',
     });
     expect(JSON.stringify(result)).not.toContain(SECRET);
     expect(JSON.stringify(result)).not.toContain(OTHER);
-    expect(users.get('work', '1234567_SB2')).toBe('support_bgc@example.com');
+    expect(users.get('work', '1234567_SB2')).toBe('support_user@example.com');
 
     expect(
       parse(await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work')).state,
@@ -417,10 +417,10 @@ describe('netsuite_session_* tools', () => {
       'work',
     );
     const out = parse(result);
-    expect(asked).toEqual(['support_bgc@example.com']);
+    expect(asked).toEqual(['support_user@example.com']);
     expect(out.user_source).toBe('vault');
     expect(out.user).toBeUndefined();
-    expect(JSON.stringify(result).toLowerCase()).not.toContain('support_bgc');
+    expect(JSON.stringify(result).toLowerCase()).not.toContain('support_user');
 
     const other = toolsWith({}, {}, { vaultUris: ['https://mail.example.com'] });
     const refused = await other.tools.call(
@@ -448,7 +448,7 @@ describe('netsuite_session_* tools', () => {
           entries: [
             {
               account: '1234567_SB2',
-              user: 'support_bgc@example.com',
+              user: 'support_user@example.com',
               lock: { holder: { machine: 'server-2', profile: 'bsd' }, until: lockUntil },
             },
           ],
@@ -554,7 +554,7 @@ describe('netsuite_session_* tools', () => {
       'work',
     );
     expect(parse(mismatch).error.code).toBe('UserMismatch');
-    expect(JSON.stringify(mismatch).toLowerCase()).not.toContain('support_bgc');
+    expect(JSON.stringify(mismatch).toLowerCase()).not.toContain('support_user');
     // No tab open: the publish is keyed by the vault user, as ensure and lock are.
     browser.identity = null;
     const viaVault = parse(
@@ -565,7 +565,7 @@ describe('netsuite_session_* tools', () => {
       ),
     );
     expect(viaVault).toMatchObject({ state: 'unchanged', user_source: 'vault' });
-    expect(store.calls[1].body.user).toBe('support_bgc@example.com');
+    expect(store.calls[1].body.user).toBe('support_user@example.com');
     expect(
       parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work')).state,
     ).toBe('dead_session');
@@ -619,9 +619,21 @@ describe('netsuite_session_* tools', () => {
     });
     expect(store.calls[0].body).toEqual({
       account: '1234567_SB2',
-      user: 'support_bgc@example.com',
+      user: 'support_user@example.com',
       holder: { machine: 'laptop', profile: 'work', run_id: 'R1' },
       ttl_s: 120,
+    });
+    // The unlock sends back the lock_id the lock got, and the holder.
+    await tools.call(
+      'netsuite_session_unlock',
+      { account: '1234567_SB2', vault_item: ITEM, run_id: 'R1' },
+      'work',
+    );
+    expect(store.calls[1].body).toEqual({
+      account: '1234567_SB2',
+      user: 'support_user@example.com',
+      lock_id: 'L1',
+      holder: { machine: 'laptop', profile: 'work', run_id: 'R1' },
     });
     expect(
       parse(
