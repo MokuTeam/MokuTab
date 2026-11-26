@@ -34,6 +34,13 @@ export enum NativeMessageType {
   MODULES_GET = 'modules_get',
   MODULES_SET = 'modules_set',
   MODULES_STATE = 'modules_state',
+  // Bridge -> extension, NetSuite module: session cookies of one account host
+  // and the user of its open tab. Values only ever travel in these messages,
+  // never in a tool result.
+  NS_COOKIES_READ = 'ns_cookies_read',
+  NS_COOKIES_WRITE = 'ns_cookies_write',
+  NS_TAB_IDENTITY = 'ns_tab_identity',
+  NS_SESSION_PROBE = 'ns_session_probe',
 }
 
 /** One installed module and whether it is on, as the bridge reports it. */

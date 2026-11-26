@@ -728,3 +728,127 @@ describe('chrome_fn_save', () => {
     );
   });
 });
+
+describe('bridge tools in tool steps', () => {
+  const storeFn: FnDefinition = {
+    name: 'acme.login.store',
+    description: 'Take a shared session first',
+    kind: 'read',
+    params: { type: 'object', properties: { account: { type: 'string' } }, required: ['account'] },
+    target: { url: 'https://acme.example.com/home' },
+    steps: [
+      {
+        id: 'store',
+        type: 'tool',
+        tool: 'netsuite_session_ensure',
+        args: { account: '{account}', wait_for_lock: true },
+        optional: true,
+      },
+      {
+        id: 'from_store',
+        type: 'finish',
+        when: { step: 'store.state', equals: 'imported' },
+        value: { state: 'logged_in', source: 'store', fp: '{prev.store.fp}' },
+      },
+      { id: 'login', type: 'js', code: 'return { state: "logged_in", source: "form" };' },
+    ],
+  };
+
+  test('runs in the bridge with the run profile and no tab; a field of its value steers when', async () => {
+    const seen: Array<{ name: string; args: any; profile: string }> = [];
+    deps.callBridgeTool = async (name, args, profile) => {
+      seen.push({ name, args, profile });
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ state: 'imported', fp: 'ab12cd34' }) }],
+      };
+    };
+    await save(storeFn);
+    const out = body(
+      await call(FN_RUN_TOOL, { name: storeFn.name, params: { account: '1234567' } }),
+    );
+    expect(out.status).toBe('ok');
+    expect(out.result).toEqual({ state: 'logged_in', source: 'store', fp: 'ab12cd34' });
+    expect(seen).toEqual([
+      {
+        name: 'netsuite_session_ensure',
+        args: { account: '1234567', wait_for_lock: true },
+        profile: 'work',
+      },
+    ]);
+    expect(browser.calls).not.toContain('netsuite_session_ensure');
+  });
+
+  test('an optional step that fails becomes {state: error} and the run goes on', async () => {
+    deps.callBridgeTool = async () => ({
+      content: [
+        {
+          type: 'text',
+          text: 'Error: netsuite_session_ensure belongs to the NetSuite module, which is switched off',
+        },
+      ],
+      isError: true,
+    });
+    await save(storeFn);
+    const out = body(
+      await call(FN_RUN_TOOL, { name: storeFn.name, params: { account: '1234567' } }),
+    );
+    expect(out.status).toBe('ok');
+    expect(out.result).toEqual({ state: 'logged_in', source: 'form' });
+  });
+
+  test('without bridge tools an optional step is an error value, a required one fails the run', async () => {
+    await save(storeFn);
+    const optional = body(
+      await call(FN_RUN_TOOL, { name: storeFn.name, params: { account: '1234567' } }),
+    );
+    expect(optional.result).toEqual({ state: 'logged_in', source: 'form' });
+
+    const required = {
+      ...storeFn,
+      name: 'acme.login.required',
+      steps: storeFn.steps.map(({ optional: _optional, ...s }) => s),
+    };
+    await save(required as FnDefinition);
+    const failed = body(
+      await call(FN_RUN_TOOL, { name: required.name, params: { account: '1234567' } }),
+    );
+    expect(failed.status).toBe('failed');
+    expect(JSON.stringify(failed)).toMatch(/cannot run bridge tools/);
+  });
+
+  test('a bridge tool that never answers stops at the step timeout', async () => {
+    deps.callBridgeTool = () => new Promise<CallToolResult>(() => {});
+    const slow: FnDefinition = {
+      ...storeFn,
+      name: 'acme.login.slow',
+      steps: storeFn.steps.map((s) => (s.id === 'store' ? { ...s, timeout_ms: 50 } : s)),
+    };
+    await save(slow);
+    const out = body(await call(FN_RUN_TOOL, { name: slow.name, params: { account: '1234567' } }));
+    expect(out.status).toBe('ok');
+    expect(out.result).toEqual({ state: 'logged_in', source: 'form' });
+  });
+
+  test('an optional navigate that fails is an error value and the run goes on', async () => {
+    const nav: FnDefinition = {
+      name: 'acme.nav.optional',
+      description: 'x',
+      kind: 'read',
+      params: { type: 'object', properties: {} },
+      target: { url: 'https://acme.example.com/home' },
+      steps: [
+        { id: 'go', type: 'navigate', url: 'https://acme.example.com/logout', optional: true },
+        {
+          id: 'done',
+          type: 'finish',
+          when: { step: 'go.state', equals: 'error' },
+          value: 'fell through',
+        },
+      ],
+    };
+    await save(nav);
+    const out = body(await call(FN_RUN_TOOL, { name: nav.name, params: {} }));
+    expect(out.status).toBe('ok');
+    expect(out.result).toBe('fell through');
+  });
+});

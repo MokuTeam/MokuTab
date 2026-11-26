@@ -13,12 +13,17 @@
  *   exists only when a person wrote and committed it (checked before a run);
  * - values are scrubbed from every step value and from the reply.
  *
- * The session key comes from BW_SESSION, or on Windows from the user
- * environment in the registry (where `bw unlock` instructions put it), and is
- * handed to bw through its environment, never on the command line.
+ * The session key comes from, freshest first: on Windows the user environment
+ * in the registry (where `bw unlock` instructions put it), the file named by
+ * MOKUTAB_BW_SESSION_FILE (re-read on every call, so a re-unlock that rewrites
+ * it reaches a running bridge), then BW_SESSION. It is handed to bw through
+ * its environment, never on the command line.
  */
 
 import { execFile } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { readEnv } from '../env';
 
 export type VaultField = 'username' | 'password' | 'totp';
@@ -39,6 +44,95 @@ export interface FnVault {
 export class VaultError extends Error {}
 
 export const BW_PATH_ENV = 'MOKUTAB_BW_PATH';
+/** A file holding the session key: a bare key, or env-file lines with BW_SESSION=... */
+export const BW_SESSION_FILE_ENV = 'MOKUTAB_BW_SESSION_FILE';
+/** Where bw keeps its data (passed to bw as BITWARDENCLI_APPDATA_DIR). */
+export const BW_APPDATA_ENV = 'MOKUTAB_BW_APPDATA';
+
+/** What the vault reads besides bw itself; tests replace it. */
+export interface VaultHost {
+  env: NodeJS.ProcessEnv;
+  platform: NodeJS.Platform;
+  home: string;
+  readFile(file: string): string;
+  exists(file: string): boolean;
+}
+
+const realHost = (): VaultHost => ({
+  env: process.env,
+  platform: process.platform,
+  home: os.homedir(),
+  readFile: (file) => fs.readFileSync(file, 'utf8'),
+  exists: (file) => fs.existsSync(file),
+});
+
+/**
+ * The session key in a session file: the value of the last BW_SESSION= line (an
+ * `export` and quotes are allowed, as a shell env file has them), or the
+ * file's only line when it is a bare key. Null when there is none.
+ */
+export function parseSessionFile(text: string): string | null {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+  // The last assignment wins, as when a shell sources the file.
+  for (const line of [...lines].reverse()) {
+    const match = /^(?:export\s+)?BW_SESSION\s*=\s*(.*)$/.exec(line);
+    if (!match) continue;
+    let value = match[1].trim();
+    if (/^(['"]).*\1$/.test(value)) value = value.slice(1, -1).trim();
+    return value || null;
+  }
+  // A bare key is base64 (it may end in "=" padding), never NAME=value.
+  return lines.length === 1 &&
+    !/\s/.test(lines[0]) &&
+    !/^[A-Za-z_][A-Za-z0-9_]*=(?!=*$)/.test(lines[0])
+    ? lines[0]
+    : null;
+}
+
+/**
+ * The bw data dir to pass, when this process would otherwise make bw look in
+ * the wrong place. MOKUTAB_BW_APPDATA wins. Else, on Linux, a host wrapper
+ * that sets XDG_CONFIG_HOME per Chrome profile also moves bw's default data
+ * dir there, where nobody ever ran `bw login` ("You are not logged in"): when
+ * that dir has no data and ~/.config/Bitwarden CLI has, use the latter.
+ * Undefined: leave bw alone (also when BITWARDENCLI_APPDATA_DIR is set).
+ */
+export function bwAppDataDir(host: VaultHost): string | undefined {
+  const explicit = readEnv(BW_APPDATA_ENV, host.env)?.trim();
+  if (explicit) return explicit;
+  if (host.env.BITWARDENCLI_APPDATA_DIR?.trim()) return undefined;
+  if (host.platform !== 'linux') return undefined;
+  const xdg = host.env.XDG_CONFIG_HOME?.trim();
+  if (!xdg) return undefined;
+  const viaXdg = path.join(xdg, 'Bitwarden CLI');
+  const usual = path.join(host.home, '.config', 'Bitwarden CLI');
+  if (path.resolve(viaXdg) === path.resolve(usual)) return undefined;
+  if (hasBwLogin(host, viaXdg)) return undefined;
+  return hasBwLogin(host, usual) ? usual : undefined;
+}
+
+/**
+ * Whether a bw data dir holds a logged-in account. Not just data.json: bw
+ * writes a stub one ({"stateVersion": ...}) on any run, also a failed one.
+ * Only key names are looked at.
+ */
+function hasBwLogin(host: VaultHost, dir: string): boolean {
+  const file = path.join(dir, 'data.json');
+  if (!host.exists(file)) return false;
+  try {
+    const data = JSON.parse(host.readFile(file));
+    if (!data || typeof data !== 'object') return false;
+    return (
+      Object.keys(data).some((key) => key.startsWith('user_')) ||
+      !!(data as Record<string, unknown>).global_account_activeAccountId
+    );
+  } catch {
+    return false;
+  }
+}
 
 type Exec = (
   file: string,
@@ -68,39 +162,56 @@ const execBw: Exec = (file, args, env) =>
  * registry comes first: this process inherited its environment from Chrome at
  * Chrome's start, so its BW_SESSION is whatever was set back then.
  */
-async function sessionKeys(exec: Exec): Promise<string[]> {
+async function sessionKeys(exec: Exec, host: VaultHost): Promise<string[]> {
   const keys: string[] = [];
-  if (process.platform === 'win32') {
+  const add = (key: string | null | undefined) => {
+    const k = key?.trim();
+    if (k && !keys.includes(k)) keys.push(k);
+  };
+  if (host.platform === 'win32') {
     try {
       const { stdout } = await exec(
         'reg',
         ['query', 'HKCU\\Environment', '/v', 'BW_SESSION'],
-        process.env,
+        host.env,
       );
       const match = /BW_SESSION\s+REG_\w+\s+(\S+)/.exec(stdout);
-      if (match) keys.push(match[1]);
+      if (match) add(match[1]);
     } catch {
-      // Not set there: the process environment may still have one.
+      // Not set there: the session file or the process environment may have one.
     }
   }
-  const fromEnv = process.env.BW_SESSION?.trim();
-  if (fromEnv && !keys.includes(fromEnv)) keys.push(fromEnv);
+  const sessionFile = readEnv(BW_SESSION_FILE_ENV, host.env)?.trim();
+  if (sessionFile) {
+    try {
+      add(parseSessionFile(host.readFile(sessionFile)));
+    } catch {
+      // Missing or unreadable now: BW_SESSION may still hold a key.
+    }
+  }
+  add(host.env.BW_SESSION);
   if (keys.length === 0) {
     throw new VaultError(
-      'no Bitwarden session: unlock the vault (bw unlock) and set BW_SESSION in the user environment',
+      sessionFile
+        ? `no Bitwarden session: ${sessionFile} (${BW_SESSION_FILE_ENV}) holds no BW_SESSION and BW_SESSION is not set; unlock the vault (bw unlock) and write the key there`
+        : 'no Bitwarden session: unlock the vault (bw unlock) and set BW_SESSION in the user environment',
     );
   }
   return keys;
 }
 
-export function bitwardenVault(exec: Exec = execBw): FnVault {
-  const bw = readEnv(BW_PATH_ENV)?.trim() || 'bw';
+export function bitwardenVault(exec: Exec = execBw, hostOverride?: Partial<VaultHost>): FnVault {
+  const host = (): VaultHost => ({ ...realHost(), ...hostOverride });
+  const bw = readEnv(BW_PATH_ENV, hostOverride?.env)?.trim() || 'bw';
   const run = async (args: string[]): Promise<string> => {
-    const keys = await sessionKeys(exec);
+    const h = host();
+    const keys = await sessionKeys(exec, h);
+    const appData = bwAppDataDir(h);
     for (let i = 0; ; i++) {
       try {
         const { stdout } = await exec(bw, [...args, '--nointeraction'], {
-          ...process.env,
+          ...h.env,
+          ...(appData ? { BITWARDENCLI_APPDATA_DIR: appData } : {}),
           BW_SESSION: keys[i],
         });
         return stdout.trim();

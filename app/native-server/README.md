@@ -49,7 +49,23 @@ The 1.x command names stay as aliases of `mokutab-bridge` and `mokutab-stdio` un
 | Wrapper logs | `%LOCALAPPDATA%\mokutab-bridge\logs` (Windows), `~/Library/Logs/mokutab-bridge` (macOS), `$XDG_STATE_HOME/mokutab-bridge/logs` or `~/.local/state/mokutab-bridge/logs` (Linux)                  | none                                                                         |
 | Temp         | `<tmpdir>/mokutab-results`, `<tmpdir>/mokutab-operations`                                                                                                                                       | none                                                                         |
 
-Also read: `MOKUTAB_BW_PATH` (the Bitwarden CLI) and `MOKUTAB_STRICT_TABS=1` (refuse tab-targeting calls without a lease or `tabId`). The first 2.x start moves a 1.x data dir into `~/.mokutab`; `doctor` reports a move that has not happened.
+Also read: `MOKUTAB_BW_PATH` (the Bitwarden CLI), `MOKUTAB_BW_SESSION_FILE` (a file with the Bitwarden session key, a bare key or a `BW_SESSION=` line, re-read on every vault call), `MOKUTAB_BW_APPDATA` (bw's data dir; without it, on Linux, a host that sets `XDG_CONFIG_HOME` per profile gets `~/.config/Bitwarden CLI` when its own dir has no bw data), `MOKUTAB_DEFAULT_PROFILE` (pins the default profile over `default-profile.json` and `chrome_switch_profile`; read once at start, from the environment the bridge inherits from Chrome or its host wrapper; without it, a remembered default that has been away for 7 days of bridge running time gives way to the profile that connects) and `MOKUTAB_STRICT_TABS=1` (refuse tab-targeting calls without a lease or `tabId`). The first 2.x start moves a 1.x data dir into `~/.mokutab`; `doctor` reports a move that has not happened.
+
+## NetSuite session store
+
+The `netsuite` module (off by default, switched on in the popup) is a client of a NetSuite session store: one live session per account and user, shared by every machine, so an agent that lands on a NetSuite login page takes the session another machine already has instead of logging in again (which would end that session).
+
+- Token: `<state dir>/ns-store-token`, written by the store host (line 1 the token; optional line 2 a base URL, default `http://127.0.0.1:12422/api/ns-sessions`; `MOKUTAB_NS_STORE_URL` overrides it). Re-read when it changes. No file: every tool answers `store_unconfigured`.
+- Requests carry `X-NS-Store-Token`, `X-Board: 1` and `X-NS-Store-Client`; the bridge logs method, path, status and time, never a body.
+- A 503, a timeout, any 5xx or a body that is not JSON is `no_store` (backs off 30 s): callers behave as without a store. `409 store_full` on a publish counts as `no_store`.
+- Cookie values move only between the bridge and the extension (typed `ns_cookies_read` / `ns_cookies_write` / `ns_tab_identity` messages, not tools) and between the bridge and the store. Tool results carry names, states and an 8-char fingerprint (sha256 of `JSESSIONID`).
+- Which user a profile expects per account is kept in `<state dir>/ns-expected-users.json` (names only). With two live users for one account, `ensure` takes the most recently active one and says so.
+- A call that names no profile, with no pinned session and several profiles connected, is refused (`ProfileRequired`): a session never lands in whichever profile is the default.
+- `vault_item` is read only when one of the item's URIs is the account host or `system.netsuite.com`, its username is kept 10 minutes per item and host (names only), and it is never echoed (`user_source: "vault"`). A publish whose open tab is logged in as another user than the vault item's is refused (`UserMismatch`).
+- Before `already_live` and before a publish the extension checks the session: card.nl with the profile's cookies is dead only when it lands on a login page of the account host (the role chooser counts as live); a network error, 429, 5xx or another host is unknown. Publish sends nothing unless the session is live (`no_session`, `probe_unknown`). On `ensure`, a dead copy of the store's session is reported dead and the answer is `none`; an unknown one is `already_live_unverified` and is never reported. `partial_import` means Chrome refused some cookies.
+- The extension asks for the `cookies` permission for this module (installed with the extension, used only while the module is on and the bridge said so).
+- An extension older than the bridge answers an unknown request type at once, and the bridge waits at most 5 s (12 s for the session check) for these requests.
+- `netsuite.login` v14 (a vault function in the registry) uses these tools from its steps; it needs this bridge.
 
 ## Development
 

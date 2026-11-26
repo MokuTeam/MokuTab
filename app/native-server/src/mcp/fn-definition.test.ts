@@ -195,14 +195,14 @@ describe('checkParams', () => {
 
 describe('templates', () => {
   const scope = {
-    args: { id: 'a b', acct: '3550721_SB1', n: 2 },
+    args: { id: 'a b', acct: '7654321_SB1', n: 2 },
     prev: { open: { url: 'https://x' } },
   };
 
   test('URL-encodes by default in URLs, with filters and literal braces', () => {
     expect(renderTemplate('https://h/?id={id}&n={n}', scope, true)).toBe('https://h/?id=a%20b&n=2');
     expect(renderTemplate('{acct|ns_host}.app.netsuite.com', scope, false)).toBe(
-      '3550721-sb1.app.netsuite.com',
+      '7654321-sb1.app.netsuite.com',
     );
     expect(renderTemplate('{{literal}} {prev.open.url|raw}', scope, true)).toBe(
       '{literal} https://x',
@@ -230,5 +230,89 @@ describe('templates', () => {
       text: 'n=2',
       list: ['a b'],
     });
+  });
+});
+
+describe('bridge tool steps', () => {
+  const base = (steps: any[]): FnDefinition => ({
+    name: 'acme.login.store',
+    description: 'x',
+    kind: 'read',
+    params: { type: 'object', properties: { account: { type: 'string' } } },
+    target: { url: 'https://acme.example.com/' },
+    steps,
+  });
+
+  test('a NetSuite session tool, optional, and a step field in when are accepted', () => {
+    expect(
+      validateDefinition(
+        base([
+          {
+            id: 'store',
+            type: 'tool',
+            tool: 'netsuite_session_ensure',
+            args: { account: '{account}' },
+            optional: true,
+          },
+          {
+            id: 'done',
+            type: 'finish',
+            when: { step: 'store.state', equals: 'imported' },
+            value: 'ok',
+          },
+        ]),
+      ),
+    ).toEqual([]);
+  });
+
+  test('other tools, a non-boolean optional and an unknown step head are refused', () => {
+    const errors = validateDefinition(
+      base([
+        { id: 'a', type: 'tool', tool: 'netsuite_session_status', optional: 'yes' },
+        { id: 'b', type: 'finish', when: { step: 'nope.state', equals: 1 }, value: 'x' },
+      ]),
+    );
+    expect(errors.join('\n')).toMatch(/steps\[0\] \(a\)\.tool: one of .*netsuite_session_ensure/);
+    expect(errors.join('\n')).toMatch(/optional: true or false/);
+    expect(errors.join('\n')).toMatch(/"nope\.state" is not an earlier step/);
+  });
+
+  test('optional is allowed on tool, navigate and wait_for steps only', () => {
+    expect(
+      validateDefinition(
+        base([
+          { id: 'go', type: 'navigate', url: 'https://acme.example.com/x', optional: true },
+          { id: 'w', type: 'wait_for', until: 'true', optional: true },
+        ]),
+      ),
+    ).toEqual([]);
+    expect(
+      validateDefinition(base([{ id: 'j', type: 'js', code: 'return 1;', optional: true }])).join(
+        '\n',
+      ),
+    ).toMatch(/unknown key/);
+  });
+
+  test('optional together with commit is refused on any step type', () => {
+    for (const step of [
+      {
+        id: 's',
+        type: 'tool',
+        tool: 'netsuite_session_publish',
+        args: { account: '1' },
+        optional: true,
+        commit: true,
+      },
+      {
+        id: 's',
+        type: 'navigate',
+        url: 'https://acme.example.com/x',
+        optional: true,
+        commit: true,
+      },
+      { id: 's', type: 'wait_for', until: 'true', optional: true, commit: true },
+    ]) {
+      expect(validateDefinition(base([step])).join('\n')).toMatch(/optional and commit together/);
+    }
   });
 });

@@ -14,7 +14,8 @@ import { acquireKeepalive } from './keepalive-manager';
 import { getExtensionBuildInfo, scheduleExtensionReload } from './dev-reload';
 import { agentTabInfo, closeAgentTab, navigateAgentTab, openAgentTab } from './agent-tabs';
 import { runWatchProbe } from './watch-probe';
-import { applyBridgeModulesState, clearModuleStates } from './extension-module';
+import { applyBridgeModulesState, clearModuleStates, moduleExplicitlyOn } from './extension-module';
+import { answerModuleBridgeRequest, findModuleBridgeRequest } from './module-bridge-requests';
 import { EXTENSION_MODULES } from './modules';
 import { moduleStatesOf, readStoredModulesState } from '@/common/module-state';
 import { BridgeRequests } from './bridge-requests';
@@ -556,6 +557,15 @@ async function connectWebSocket(port: number): Promise<boolean> {
             };
           }
           ws.send(JSON.stringify({ responseToRequestId: message.requestId, payload }));
+        } else if (message.requestId && findModuleBridgeRequest(EXTENSION_MODULES, message.type)) {
+          // A module's typed request (NetSuite cookies): answered only while it is on.
+          const found = findModuleBridgeRequest(EXTENSION_MODULES, message.type)!;
+          const payload = await answerModuleBridgeRequest(
+            found,
+            message.payload,
+            moduleExplicitlyOn,
+          );
+          ws.send(JSON.stringify({ responseToRequestId: message.requestId, payload }));
         } else if (message.type === NativeMessageType.WATCH_PROBE && message.requestId) {
           let payload: Record<string, unknown>;
           try {
@@ -567,6 +577,15 @@ async function connectWebSocket(port: number): Promise<boolean> {
             };
           }
           ws.send(JSON.stringify({ responseToRequestId: message.requestId, payload }));
+        } else if (message.requestId && typeof message.type === 'string') {
+          // A request type this extension does not know (a newer bridge): say
+          // so at once instead of letting the bridge wait for its timeout.
+          ws.send(
+            JSON.stringify({
+              responseToRequestId: message.requestId,
+              payload: { status: 'error', error: `unknown request type ${message.type}` },
+            }),
+          );
         }
       } catch (err: any) {
         console.error(`${LOG_PREFIX} Error handling WS message:`, err);

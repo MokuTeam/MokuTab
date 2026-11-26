@@ -42,6 +42,12 @@ export interface ExtensionModule {
    * takes its tab alone.
    */
   sharesTab?(name: string): boolean;
+  /**
+   * Typed bridge -> extension requests this module answers, by message type
+   * (NetSuite: session cookies). Not tools: what they return never reaches a
+   * tool result. Refused while the module is off.
+   */
+  bridgeRequests?: Readonly<Record<string, (payload: any) => Promise<unknown>>>;
 }
 
 let cache: ModuleStates | null = null;
@@ -57,6 +63,16 @@ export function loadModuleStates(): Promise<void> {
     });
   }
   return loading;
+}
+
+/**
+ * Whether the bridge said this module is on. Unlike moduleEnabled, a module
+ * the bridge never mentioned counts as off: for requests that touch secrets
+ * (NetSuite cookies), the default-on of a pre-switch bridge is not enough.
+ */
+export async function moduleExplicitlyOn(id: string): Promise<boolean> {
+  await loadModuleStates();
+  return cache?.[id] === true;
 }
 
 /** Whether a module is on, as last pushed by the bridge (on when never heard of). */

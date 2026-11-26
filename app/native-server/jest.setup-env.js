@@ -30,3 +30,17 @@ if (!process.env.MOKUTAB_DATA_DIR) {
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ modules: { workato: true } }));
   process.env.MOKUTAB_DATA_DIR = dir;
 }
+
+// The machine's own vault and profile settings must not reach the tests: a
+// session file or a pinned default set on a dev box or a server changes what
+// the vault and the profile registry do.
+for (const name of [
+  'MOKUTAB_BW_SESSION_FILE',
+  'WORKATOMCP_BW_SESSION_FILE',
+  'MOKUTAB_BW_APPDATA',
+  'WORKATOMCP_BW_APPDATA',
+  'MOKUTAB_DEFAULT_PROFILE',
+  'WORKATOMCP_DEFAULT_PROFILE',
+]) {
+  delete process.env[name];
+}

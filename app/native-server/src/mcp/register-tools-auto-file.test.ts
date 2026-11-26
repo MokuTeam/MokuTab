@@ -8,7 +8,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { TOOL_SCHEMAS, WORKATO_TOOL_ALIASES } from '@mokuhub/mokutab-shared';
+import { NETSUITE_TOOL_SCHEMAS, TOOL_SCHEMAS, WORKATO_TOOL_ALIASES } from '@mokuhub/mokutab-shared';
 import { createToolRouter } from './register-tools';
 import { profileRegistry } from '../server/profile-registry';
 import nativeMessagingHostInstance from '../native-messaging-host';
@@ -16,7 +16,7 @@ import nativeMessagingHostInstance from '../native-messaging-host';
 const PIXEL = 'AAECAwQFBgcICQoLDA0ODw==';
 
 function stubResponse(data: unknown) {
-  jest.spyOn(profileRegistry, 'getConnectedProfiles').mockReturnValue(['centium']);
+  jest.spyOn(profileRegistry, 'getConnectedProfiles').mockReturnValue(['work']);
   return jest
     .spyOn(profileRegistry, 'sendRequest')
     .mockResolvedValue({ status: 'success', data } as any);
@@ -25,7 +25,7 @@ function stubResponse(data: unknown) {
 /** Pin a profile so every call takes the WebSocket path, as the router tests do. */
 async function pinnedRouter() {
   const router = createToolRouter();
-  await router.handleToolCall('chrome_switch_profile', { profile: 'centium' });
+  await router.handleToolCall('chrome_switch_profile', { profile: 'work' });
   return router;
 }
 
@@ -133,9 +133,12 @@ describe('register-tools image and auto-file wiring', () => {
     expect(viaProfile).not.toHaveBeenCalled();
     expect(viaNative).not.toHaveBeenCalled();
     const aliases = Object.keys(WORKATO_TOOL_ALIASES);
-    expect(tools).toHaveLength(TOOL_SCHEMAS.length + aliases.length);
+    // The suite's config.json turns Workato on and leaves NetSuite off.
+    const netsuite = new Set(NETSUITE_TOOL_SCHEMAS.map((tool) => tool.name));
+    const served = TOOL_SCHEMAS.filter((tool) => !netsuite.has(tool.name));
+    expect(tools).toHaveLength(served.length + aliases.length);
     expect(tools.map((tool) => tool.name)).toEqual([
-      ...TOOL_SCHEMAS.map((tool) => tool.name),
+      ...served.map((tool) => tool.name),
       ...aliases,
     ]);
   });

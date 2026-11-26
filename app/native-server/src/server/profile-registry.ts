@@ -7,6 +7,20 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { readEnv } from '../env';
+
+/** Pins the default profile; beats default-profile.json and chrome_switch_profile. */
+export const DEFAULT_PROFILE_ENV = 'MOKUTAB_DEFAULT_PROFILE';
+/**
+ * A remembered default that has been away for this much bridge running time
+ * (not wall-clock time: a week with the machine off counts nothing) is taken
+ * for gone, a renamed or deleted profile, and the profile that connects
+ * instead becomes the default.
+ */
+export const STALE_DEFAULT_MS = 7 * 24 * 60 * 60 * 1000;
+const HEARTBEAT_MS = 60 * 60 * 1000;
+/** A longer gap between ticks is a stopped bridge or a sleeping machine. */
+const TICK_GAP_MS = 2 * HEARTBEAT_MS;
 
 interface PendingRequest {
   resolve: (value: any) => void;
@@ -32,6 +46,18 @@ export class ProfileRegistry {
    */
   private preferredProfile: string | null = null;
   private preferenceFile: string | null = null;
+  /** Set by MOKUTAB_DEFAULT_PROFILE: the default never moves. */
+  private pinnedProfile: string | null = null;
+  /** The default without the pin (what the file keeps, so dropping the pin restores it). */
+  private storedProfile: string | null = null;
+  /** When the stored default was chosen (ISO), kept in the file. */
+  private storedAt: string | null = null;
+  /** Bridge running time the default has been away since it last connected (ms). */
+  private defaultAbsentMs = 0;
+  private lastTick: number | null = null;
+  private preferenceDirty = false;
+  private heartbeat: ReturnType<typeof setInterval> | null = null;
+  private now: () => number = Date.now;
   private pendingRequests: Map<string, PendingRequest> = new Map();
   private defaultTimeoutMs = 120000;
   /**
@@ -92,31 +118,119 @@ export class ProfileRegistry {
    * Remember the default profile in `file` across bridge restarts. Only the
    * running host calls this; tests keep the registry in memory.
    */
-  public enablePreferencePersistence(file: string): void {
+  public enablePreferencePersistence(
+    file: string,
+    options: { env?: NodeJS.ProcessEnv; now?: () => number; heartbeat?: boolean } = {},
+  ): void {
     this.preferenceFile = file;
+    if (options.now) this.now = options.now;
     try {
-      const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { profile?: unknown };
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as {
+        profile?: unknown;
+        set_at?: unknown;
+        default_absent_ms?: unknown;
+      };
       if (typeof parsed.profile === 'string' && parsed.profile.trim() !== '') {
+        this.storedProfile = parsed.profile;
         this.preferredProfile = parsed.profile;
-        if (this.connections.has(parsed.profile)) this.activeProfile = parsed.profile;
+        if (typeof parsed.set_at === 'string') this.storedAt = parsed.set_at;
+        const absent = Number(parsed.default_absent_ms);
+        if (Number.isFinite(absent) && absent > 0) this.defaultAbsentMs = absent;
       }
     } catch {
       // No file yet, or unreadable: the first profile to connect becomes the default.
     }
+    const pin = readEnv(DEFAULT_PROFILE_ENV, options.env)?.trim();
+    if (pin) {
+      this.pinnedProfile = pin;
+      this.preferredProfile = pin;
+    }
+    if (this.preferredProfile && this.connections.has(this.preferredProfile)) {
+      this.activeProfile = this.preferredProfile;
+    }
+    if (options.heartbeat !== false) {
+      // Counts the default's absence while the bridge runs; unref'd, it never keeps the process up.
+      this.heartbeat = setInterval(() => this.flushPreference(), HEARTBEAT_MS);
+      this.heartbeat.unref?.();
+    }
+  }
+
+  /**
+   * Add the time since the last tick to the default's absence, when the
+   * default was away for it and the bridge was running all along (a gap over
+   * TICK_GAP_MS is a stopped bridge or a sleeping machine, and counts nothing).
+   */
+  private accountAbsence(): void {
+    const now = this.now();
+    if (this.lastTick !== null) {
+      const gap = now - this.lastTick;
+      const away =
+        !!this.preferredProfile &&
+        !this.pinnedProfile &&
+        !this.connections.has(this.preferredProfile);
+      if (away && gap > 0 && gap <= TICK_GAP_MS) {
+        this.defaultAbsentMs += gap;
+        this.preferenceDirty = true;
+      }
+    }
+    this.lastTick = now;
+  }
+
+  /** Count the absence up to now and write the file if anything changed (heartbeat, exit). */
+  public flushPreference(): void {
+    this.accountAbsence();
+    this.savePreference();
+  }
+
+  /** Stop the heartbeat (tests). */
+  public stopPreferenceHeartbeat(): void {
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = null;
+  }
+
+  /**
+   * A remembered default that has been away for STALE_DEFAULT_MS of bridge
+   * running time: a renamed or deleted profile. Never a pinned one.
+   */
+  private preferredIsStale(): boolean {
+    if (!this.preferredProfile || this.pinnedProfile) return false;
+    if (this.connections.has(this.preferredProfile)) return false;
+    return this.defaultAbsentMs > STALE_DEFAULT_MS;
+  }
+
+  private storeDefault(profileName: string): void {
+    if (this.storedProfile !== profileName) {
+      this.storedProfile = profileName;
+      this.storedAt = new Date(this.now()).toISOString();
+      this.defaultAbsentMs = 0;
+      this.preferenceDirty = true;
+    }
+    // A pinned default stays; a switch still moves the active profile.
+    if (!this.pinnedProfile) this.preferredProfile = profileName;
   }
 
   private setPreferredProfile(profileName: string): void {
-    this.preferredProfile = profileName;
-    if (!this.preferenceFile) return;
+    this.storeDefault(profileName);
+    this.savePreference();
+  }
+
+  private savePreference(): void {
+    if (!this.preferenceFile || !this.preferenceDirty) return;
+    this.preferenceDirty = false;
     try {
       fs.mkdirSync(path.dirname(this.preferenceFile), { recursive: true });
       fs.writeFileSync(
         this.preferenceFile,
-        JSON.stringify({ profile: profileName, set_at: new Date().toISOString() }),
+        JSON.stringify({
+          // Older bridges read only this key (a string, or no default).
+          profile: this.storedProfile,
+          set_at: this.storedAt,
+          default_absent_ms: Math.round(this.defaultAbsentMs),
+        }),
       );
     } catch (error: any) {
       logProfileRegistry(
-        `[ProfileRegistry] Could not persist default profile "${profileName}": ${error?.message}`,
+        `[ProfileRegistry] Could not persist default profile "${this.storedProfile}": ${error?.message}`,
       );
     }
   }
@@ -125,6 +239,7 @@ export class ProfileRegistry {
    * Register a new profile connection
    */
   public register(profileName: string, socket: any): void {
+    this.accountAbsence();
     // Take the slot before closing the old socket, so a close event that fires
     // synchronously already sees the new socket and leaves the profile alone.
     const existing = this.connections.get(profileName);
@@ -142,6 +257,16 @@ export class ProfileRegistry {
     this.generation += 1;
     logProfileRegistry(`[ProfileRegistry] Profile "${profileName}" connected.`);
 
+    if (profileName === this.preferredProfile) {
+      if (this.defaultAbsentMs > 0) this.preferenceDirty = true;
+      this.defaultAbsentMs = 0;
+    } else if (this.preferredIsStale()) {
+      logProfileRegistry(
+        `[ProfileRegistry] Default profile "${this.preferredProfile}" has been away for ${Math.round(this.defaultAbsentMs / 86_400_000)} days of bridge running time; "${profileName}" is the default now.`,
+      );
+      this.storeDefault(profileName);
+    }
+
     if (this.preferredProfile === profileName && this.activeProfile !== profileName) {
       this.activeProfile = profileName;
       logProfileRegistry(
@@ -151,8 +276,9 @@ export class ProfileRegistry {
       // If no active profile, or the active profile is no longer connected, set this as active
       this.activeProfile = profileName;
       logProfileRegistry(`[ProfileRegistry] Active profile automatically set to "${profileName}".`);
-      if (this.preferredProfile === null) this.setPreferredProfile(profileName);
+      if (this.preferredProfile === null) this.storeDefault(profileName);
     }
+    this.savePreference();
 
     // Set up message handling for this socket
     socket.on('message', (rawData: any) => {
@@ -207,6 +333,8 @@ export class ProfileRegistry {
    * Deregister a profile connection
    */
   public deregister(profileName: string): void {
+    this.accountAbsence();
+    this.savePreference();
     if (this.connections.has(profileName)) {
       this.connections.delete(profileName);
       this.connectionSerials.delete(profileName);

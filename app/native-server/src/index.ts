@@ -59,6 +59,8 @@ process.on('SIGTERM', () => {
 process.on('exit', () => {
   // Watch state written on a timer must not be lost to a restart.
   watchManager.flush();
+  // The default profile's absence is counted up to the exit.
+  profileRegistry.flushPreference();
 });
 
 process.on('uncaughtException', (error) => {

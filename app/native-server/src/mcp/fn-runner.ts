@@ -15,6 +15,7 @@
 
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import {
+  FN_BRIDGE_TOOL_ALLOWLIST,
   expressionBody,
   renderTemplate,
   renderValue,
@@ -51,6 +52,15 @@ export interface FnDriver {
   tabInfo(tabId: number, waitCompleteMs?: number): Promise<TabInfo>;
   navigate(tabId: number, url: string, timeoutMs: number): Promise<TabInfo>;
   callTool(name: string, args: Record<string, unknown>, timeoutMs: number): Promise<CallToolResult>;
+  /**
+   * A bridge tool (FN_BRIDGE_TOOL_ALLOWLIST), run in this run's profile but not
+   * in its tab. Absent on a driver that cannot reach the bridge modules.
+   */
+  callBridgeTool?(
+    name: string,
+    args: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<CallToolResult>;
   sleep(ms: number): Promise<void>;
   now(): number;
 }
@@ -131,6 +141,21 @@ function unloadableUrl(url: string): string | null {
   if (!/^https?:\/\//i.test(url)) return `refused to load ${url}: not an http(s) URL`;
   if (sessionEndingUrl(url)) return `refused to load a session-ending page: ${url}`;
   return null;
+}
+
+/**
+ * The value a step condition names: a step id, or a step id and a field path
+ * (`store.state`). A step id with a dot in it wins over a path.
+ */
+export function stepValue(prev: Record<string, unknown>, ref: string): unknown {
+  if (Object.prototype.hasOwnProperty.call(prev, ref)) return prev[ref];
+  const [head, ...rest] = ref.split('.');
+  let value: unknown = prev[head];
+  for (const key of rest) {
+    if (!value || typeof value !== 'object') return undefined;
+    value = (value as Record<string, unknown>)[key];
+  }
+  return value;
 }
 
 /** Page URLs tested against definition regexes are capped, so a slow regex stays bounded. */
@@ -339,10 +364,30 @@ export class FnRunner {
     return id ? (state.prev[id] ?? null) : null;
   }
 
+  /** Run a step whose failure is only its value: {state: 'error', error}. */
+  private async optionally(
+    state: RunState,
+    step: FnStep,
+    run: () => Promise<StepsOutcome | null>,
+  ): Promise<StepsOutcome | null> {
+    try {
+      return await run();
+    } catch (err: any) {
+      if (!(err instanceof StepError)) throw err;
+      state.prev[step.id] = { state: 'error', error: err.message };
+      return null;
+    }
+  }
+
   private async execute(state: RunState, step: FnStep): Promise<StepsOutcome | null> {
     const timeout = Math.min(step.timeout_ms ?? 0, MAX_STEP_TIMEOUT_MS);
     switch (step.type) {
       case 'navigate': {
+        if (step.optional) {
+          return this.optionally(state, step, () =>
+            this.execute(state, { ...step, optional: false }),
+          );
+        }
         const url = renderTemplate(step.url as string, this.scope(state), true);
         const refusal = unloadableUrl(url);
         if (refusal) throw new StepError(refusal);
@@ -358,6 +403,11 @@ export class FnRunner {
         return null;
       }
       case 'wait_for': {
+        if (step.optional) {
+          return this.optionally(state, step, () =>
+            this.execute(state, { ...step, optional: false }),
+          );
+        }
         state.prev[step.id] = await this.waitFor(state, step, timeout || DEFAULT_WAIT_MS);
         return null;
       }
@@ -391,12 +441,16 @@ export class FnRunner {
         } else {
           args = (renderValue(step.args ?? {}, this.scope(state)) as Record<string, unknown>) ?? {};
         }
-        const result = await this.callTool(
-          state,
-          step.tool as string,
-          args,
-          timeout || DEFAULT_TOOL_MS,
-        );
+        let result: unknown;
+        try {
+          result = FN_BRIDGE_TOOL_ALLOWLIST.includes(step.tool as string)
+            ? await this.callBridgeTool(step.tool as string, args, timeout || DEFAULT_TOOL_MS)
+            : await this.callTool(state, step.tool as string, args, timeout || DEFAULT_TOOL_MS);
+        } catch (err: any) {
+          if (!step.optional || !(err instanceof StepError)) throw err;
+          // An optional step that failed: its value says so and the run goes on.
+          result = { state: 'error', error: err.message };
+        }
         state.prev[step.id] = scrubSecrets(result, state.secrets);
         state.last_value_step = step.id;
         return null;
@@ -494,6 +548,44 @@ export class FnRunner {
     return value;
   }
 
+  /** A bridge tool: the run's profile, no tab. */
+  private async callBridgeTool(
+    name: string,
+    args: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<unknown> {
+    if (!this.driver.callBridgeTool)
+      throw new StepError(`${name}: this bridge cannot run bridge tools from a function`);
+    let result: CallToolResult;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    try {
+      // The step's timeout and the run's cancel apply here too: the tool runs
+      // on in the bridge, but the run stops waiting for it.
+      const stopped = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs);
+        onAbort = () => reject(new Error('the call was cancelled'));
+        if (this.signal?.aborted) onAbort();
+        else this.signal?.addEventListener('abort', onAbort, { once: true });
+      });
+      result = await Promise.race([this.driver.callBridgeTool(name, args, timeoutMs), stopped]);
+    } catch (err: any) {
+      throw new StepError(`${name}: ${err?.message || String(err)}`);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (onAbort) this.signal?.removeEventListener('abort', onAbort);
+    }
+    const value = parseMaybeJson(firstText(result));
+    if (result.isError) {
+      const message =
+        typeof value === 'string'
+          ? value
+          : ((value as any)?.error?.message ?? JSON.stringify(value));
+      throw new StepError(`${name}: ${message}`);
+    }
+    return value;
+  }
+
   /** Run a body in the page; returns its value. */
   private async runJs(state: RunState, body: string, timeoutMs: number): Promise<unknown> {
     let result: CallToolResult;
@@ -535,7 +627,7 @@ export class FnRunner {
     cond: FnCondition,
   ): Promise<{ ok: boolean; value?: unknown; error?: string }> {
     if (cond.step !== undefined) {
-      const actual = stableJson(state.prev[cond.step] ?? null);
+      const actual = stableJson(stepValue(state.prev, cond.step) ?? null);
       const options = cond.equals !== undefined ? [cond.equals] : (cond.in ?? []);
       return { ok: options.some((option) => stableJson(option) === actual) };
     }

@@ -10,6 +10,7 @@ import {
   applyBridgeModulesState,
   clearModuleStates,
   moduleEnabled,
+  moduleExplicitlyOn,
   resetModuleStateCache,
 } from '@/entrypoints/background/extension-module';
 import { gateWorkatoContent } from '@/entrypoints/background/modules/workato/content-gate';
@@ -60,6 +61,18 @@ afterEach(() => {
 describe('the state the background keeps', () => {
   test('a module the bridge never mentioned is on', async () => {
     expect(await moduleEnabled('workato')).toBe(true);
+  });
+
+  test('explicitly on only when the bridge said so', async () => {
+    expect(await moduleExplicitlyOn('netsuite')).toBe(false);
+    await applyBridgeModulesState({
+      modules: [{ id: 'netsuite', title: 'NetSuite', enabled: true }],
+    });
+    expect(await moduleExplicitlyOn('netsuite')).toBe(true);
+    await applyBridgeModulesState({
+      modules: [{ id: 'netsuite', title: 'NetSuite', enabled: false }],
+    });
+    expect(await moduleExplicitlyOn('netsuite')).toBe(false);
   });
 
   test('a push applies at once and is stored for the popup and content scripts', async () => {

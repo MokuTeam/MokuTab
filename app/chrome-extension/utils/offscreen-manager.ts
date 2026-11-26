@@ -104,5 +104,4 @@ export class OffscreenManager {
   }
 }
 
-
 export const offscreenManager = OffscreenManager.getInstance();

@@ -5,7 +5,12 @@ import * as path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
-import { CORE_TOOL_SCHEMAS, TOOL_SCHEMAS, WORKATO_TOOL_ALIASES } from '@mokuhub/mokutab-shared';
+import {
+  CORE_TOOL_SCHEMAS,
+  NETSUITE_TOOL_SCHEMAS,
+  TOOL_SCHEMAS,
+  WORKATO_TOOL_ALIASES,
+} from '@mokuhub/mokutab-shared';
 import {
   createMcpServer,
   liveMcpServerCount,
@@ -64,9 +69,10 @@ describe('a module switch reaches every open MCP session', () => {
   test('both sessions get list_changed, and their next tools/list is the new catalogue', async () => {
     const first = await openSession();
     const second = await openSession();
-    // Every tool plus the Workato aliases of the four profile/bridge tools.
+    // Every tool but the NetSuite ones (off: config.json does not name the
+    // module) plus the Workato aliases of the four profile/bridge tools.
     expect((await first.client.listTools()).tools).toHaveLength(
-      TOOL_SCHEMAS.length + Object.keys(WORKATO_TOOL_ALIASES).length,
+      TOOL_SCHEMAS.length - NETSUITE_TOOL_SCHEMAS.length + Object.keys(WORKATO_TOOL_ALIASES).length,
     );
 
     switches.set('workato', false);
