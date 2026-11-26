@@ -85,6 +85,8 @@ export interface NsDeps {
   vaultUris(item: string): Promise<VaultUri[]>;
   /** The username of a vault item (never its password). */
   vaultUsername(item: string): Promise<string>;
+  /** Whether a vault item has a TOTP (never the secret); absent: not known. */
+  vaultHasTotp?(item: string): Promise<boolean>;
   connectedProfiles(): string[];
   machine: string;
   sleep(ms: number): Promise<void>;
@@ -112,6 +114,28 @@ function refusal(code: string, message: string): CallToolResult {
     content: [{ type: 'text', text: JSON.stringify({ error: { code, message } }) }],
     isError: true,
   };
+}
+
+/** A short popup text for a store state that is not a session. */
+function storeStateText(state: unknown): string {
+  switch (state) {
+    case 'store_unconfigured':
+      return 'no session store on this machine';
+    case 'no_store':
+      return 'session store not reachable';
+    case 'none':
+      return 'no live session for this account in the store';
+    case 'already_live_unverified':
+      return "could not check this profile's session; reload the page";
+    default:
+      return `could not open the session (${String(state ?? 'error')})`;
+  }
+}
+
+/** A short popup text for a thrown error (a refusal's message carries no value). */
+function popupError(err: any): string {
+  if (err instanceof ToolRefusal) return err.message;
+  return 'could not reach the session store';
 }
 
 /** What a store answer means when it is no answer at all. */
@@ -191,6 +215,8 @@ export class NsSessionTools {
 
   /** Checked vault usernames by item and host, with when they were read. */
   private readonly vaultUsers = new Map<string, { user: string | null; at: number }>();
+  /** Whether a vault item has a TOTP, per item (no secret kept). */
+  private readonly vaultTotp = new Map<string, { has: boolean; at: number }>();
 
   constructor(private readonly deps: NsDeps) {}
 
@@ -305,6 +331,20 @@ export class NsSessionTools {
     return user;
   }
 
+  /** Whether a checked vault item has a TOTP; null when that cannot be told. Cached like the username. */
+  private async vaultHasTotp(item: unknown): Promise<boolean | null> {
+    if (typeof item !== 'string' || !item || !this.deps.vaultHasTotp) return null;
+    const cached = this.vaultTotp.get(item);
+    if (cached && this.deps.now() - cached.at < VAULT_USER_TTL_MS) return cached.has;
+    try {
+      const has = await this.deps.vaultHasTotp(item);
+      this.vaultTotp.set(item, { has, at: this.deps.now() });
+      return has;
+    } catch {
+      return null;
+    }
+  }
+
   /** args.user, else the checked vault item's username, else the profile's remembered user. */
   private async who(args: Json, account: NsAccount, profile: string): Promise<Who> {
     if (typeof args.user === 'string' && args.user.trim()) {
@@ -363,6 +403,92 @@ export class NsSessionTools {
           }
         : {}),
     };
+  }
+
+  // The popup's NetSuite sessions section (metadata only).
+
+  /** The store's live and dying entries, as the popup lists them. */
+  async popupList(): Promise<Json> {
+    let result: Json;
+    try {
+      result = await this.status(null);
+    } catch (err: any) {
+      return { ok: false, error: popupError(err) };
+    }
+    if (result.state !== 'ok') return { ok: false, error: storeStateText(result.state) };
+    const entries = (result.entries as Json[])
+      .filter((e) => e?.state === 'live' || e?.state === 'dying')
+      .map((e) => ({
+        account: e.account,
+        user: e.user ?? null,
+        role: e.role ?? null,
+        state: e.state,
+        abs_expiry: e.abs_expiry ?? null,
+        idle_expiry: e.idle_expiry ?? null,
+        last_activity: e.last_activity ?? null,
+        last_where: e.last_where ?? null,
+      }));
+    return { ok: true, entries };
+  }
+
+  /**
+   * The popup's click on an account: open it in this profile, logged in. A
+   * click is an explicit action, so the store's live user is imported even
+   * when this profile remembers nobody for the account (and remembered after).
+   * A live session of the same user is never replaced; one of another user
+   * is refused. Answers the URL the extension opens, never a value.
+   */
+  async popupOpen(payload: Json, profile: string): Promise<Json> {
+    const account = normalizeAccount(String(payload?.account ?? ''));
+    if (!account) return { ok: false, error: 'not a NetSuite account' };
+    const url = `https://${account.host}/app/center/card.nl`;
+    const secrets: string[] = [];
+    try {
+      const listed = await this.status(account);
+      if (listed.state !== 'ok') return { ok: false, error: storeStateText(listed.state) };
+      const live = (listed.entries as Json[])
+        .filter(
+          (e) => e?.account === account.account && (e?.state === 'live' || e?.state === 'dying'),
+        )
+        .sort((a, b) => (untilMs(b?.last_activity) || 0) - (untilMs(a?.last_activity) || 0));
+      if (!live.length)
+        return { ok: false, error: 'no live session for this account in the store' };
+      const user: string | null = typeof live[0].user === 'string' ? live[0].user : null;
+      const local = await this.localFingerprint(account, profile).catch(() => null);
+      if (local) {
+        const state = await this.probe(account, profile);
+        if (state === 'alive') {
+          const identity = await this.deps.tabIdentity(profile, account.host).catch(() => null);
+          const tabUser = identity?.user ? identity.user.trim().toLowerCase() : null;
+          if (tabUser && user && tabUser !== user) {
+            return {
+              ok: false,
+              error:
+                'this profile is logged in to the account as another user; log out there first',
+            };
+          }
+          return { ok: true, url, action: 'opened' };
+        }
+      }
+      const result = await this.ensureOnce(
+        account,
+        { user, source: user ? 'args' : null },
+        profile,
+        secrets,
+      );
+      if (result.state === 'imported' || result.state === 'already_live') {
+        return { ok: true, url, action: result.state };
+      }
+      if (result.state === 'locked_by') {
+        return { ok: false, error: 'another machine is logging in to this account right now' };
+      }
+      if (result.state === 'partial_import') {
+        return { ok: false, error: 'Chrome refused some session cookies; log in instead' };
+      }
+      return { ok: false, error: storeStateText(result.state) };
+    } catch (err: any) {
+      return { ok: false, error: String(scrubSecrets(popupError(err), secrets)) };
+    }
   }
 
   // Transparent mode (the extension reports a host; values never leave this
@@ -724,6 +850,11 @@ export class NsSessionTools {
     }
     const fp = fingerprint(session.value);
     const now = this.deps.now();
+    // Whether this account can be renewed without a person (the item has a
+    // TOTP): only from an explicit publish with a vault item that passed the
+    // check above; a transparent publish cannot know and leaves it out.
+    const autoRenew =
+      args.transparent !== true && fromVault ? await this.vaultHasTotp(args.vault_item) : null;
     const answer = await this.deps.store.request('POST', '/entry', {
       body: {
         account: account.account,
@@ -736,6 +867,7 @@ export class NsSessionTools {
         origin: { machine: this.deps.machine, profile },
         login_at: args.login_at === true ? now : null,
         seen_at: now,
+        ...(typeof autoRenew === 'boolean' ? { auto_renew: autoRenew } : {}),
       },
       profile,
     });

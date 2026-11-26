@@ -69,6 +69,8 @@ function liveTools(): NsSessionTools {
       },
       vaultUris: (item) => vault.uris(item),
       vaultUsername: (item) => vault.get(item, 'username'),
+      vaultHasTotp: (item) =>
+        vault.hasTotp ? vault.hasTotp(item) : Promise.reject(new Error('not supported')),
       connectedProfiles: () => profileRegistry.getConnectedProfiles(),
       machine: os.hostname(),
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -114,5 +116,9 @@ export const netsuiteModule: BridgeModule = {
       transparent().onActivity(payload, profile),
     [NativeMessageType.NS_SESSION_ENDING]: (payload, profile) =>
       transparent().onEnding(payload, profile),
+    // The popup's NetSuite sessions section: the list, and a click that opens one.
+    [NativeMessageType.NS_POPUP_LIST]: () => liveTools().popupList(),
+    [NativeMessageType.NS_POPUP_OPEN]: (payload, profile) =>
+      liveTools().popupOpen(payload, profile),
   },
 };

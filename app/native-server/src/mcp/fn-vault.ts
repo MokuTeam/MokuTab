@@ -38,6 +38,8 @@ export interface VaultUri {
 export interface FnVault {
   get(item: string, field: VaultField): Promise<string>;
   uris(item: string): Promise<VaultUri[]>;
+  /** Whether the item has a TOTP secret; the secret itself is never returned or kept. */
+  hasTotp?(item: string): Promise<boolean>;
 }
 
 /** A vault problem the caller can act on (locked, missing item); never carries a secret. */
@@ -266,6 +268,19 @@ export function bitwardenVault(exec: Exec = execBw, hostOverride?: Partial<Vault
           uri: u.uri.trim(),
           match: typeof u.match === 'number' ? u.match : null,
         }));
+    },
+    async hasTotp(item) {
+      assertItemId(item);
+      const raw = await run(['get', 'item', item]);
+      let parsed: any;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        throw new VaultError('bw get item did not return JSON');
+      }
+      // Only whether a secret is there; the secret is dropped with the item here.
+      const totp = parsed?.login?.totp;
+      return typeof totp === 'string' && totp.trim() !== '';
     },
   };
 }

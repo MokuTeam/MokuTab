@@ -364,3 +364,25 @@ describe('session key order and secrecy', () => {
     expect(parseSessionFile('BW_SESSION=old\nexport BW_SESSION="new"\n')).toBe('new');
   });
 });
+
+describe('hasTotp', () => {
+  test('tells whether the item has a TOTP and never returns the secret', async () => {
+    const SEED = 'JBSWY3DPEHPK3PXP';
+    for (const [totp, expected] of [
+      [SEED, true],
+      ['', false],
+      [null, false],
+    ] as const) {
+      const vault = bitwardenVault(
+        async () => ({
+          stdout: JSON.stringify({ login: { username: 'u', password: 'p', totp } }),
+          stderr: '',
+        }),
+        { platform: 'linux', env: { BW_SESSION: 'k' }, exists: () => false },
+      );
+      const has = await vault.hasTotp!(ITEM);
+      expect(has).toBe(expected);
+      expect(JSON.stringify(has)).not.toContain(SEED);
+    }
+  });
+});
