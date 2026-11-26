@@ -115,7 +115,7 @@ describe('publish on a new JSESSIONID', () => {
       {
         type: NativeMessageType.NS_SESSION_CHANGED,
         payload: { host: HOST, after_login: false },
-        timeoutMs: undefined,
+        timeoutMs: 45_000,
       },
     ]);
     await h.advance(CHANGE_MIN_INTERVAL_MS);
@@ -175,6 +175,33 @@ describe('publish loop guards', () => {
     for (let i = 0; i < 3; i++) h.watcher.onCookieChanged(changed());
     await h.advance(CHANGE_DEBOUNCE_MS);
     expect(h.sent).toEqual([]);
+  });
+
+  test('the probe is quiet only while it runs and 1 s after: a hand login right after is published', async () => {
+    let release: (v: any) => void = () => undefined;
+    (globalThis as any).fetch = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const h = harness();
+    const probe = probeNsSession({ host: HOST });
+    // While the probe runs: quiet.
+    h.watcher.onCookieChanged(changed());
+    await h.advance(CHANGE_DEBOUNCE_MS);
+    expect(h.sent).toEqual([]);
+    release({
+      url: `https://${HOST}/app/center/card.nl`,
+      ok: true,
+      body: { cancel: async () => undefined },
+    });
+    await probe;
+    // 1.5 s later the user logs in by hand: that is a new session.
+    await h.advance(1_500);
+    h.watcher.onCookieChanged(changed());
+    await h.advance(CHANGE_DEBOUNCE_MS);
+    expect(h.sent.map((s) => s.type)).toEqual([NativeMessageType.NS_SESSION_CHANGED]);
   });
 });
 
@@ -243,11 +270,11 @@ describe('import on a login landing', () => {
     await h.watcher.onBeforeRedirect(
       redirect({ redirectUrl: `https://${HOST}/app/login/secure/chooserole.nl` }),
     );
+    await h.watcher.onBeforeRedirect(redirect({ type: 'sub_frame' }));
     expect(h.sent).toEqual([]);
     await h.watcher.onBeforeRedirect(
       redirect({ initiator: 'chrome-extension://another-extension' }),
     );
-    await h.watcher.onBeforeRedirect(redirect({ type: 'sub_frame' }));
     expect(h.sent).toEqual([
       {
         type: NativeMessageType.NS_LOGIN_LANDING,

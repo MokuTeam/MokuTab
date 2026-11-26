@@ -11,25 +11,33 @@
 
 export const ACCOUNT_HOST = /^[0-9a-z]+(?:-[0-9a-z]+)?\.app\.netsuite\.com$/;
 
-/** Hosts whose cookies this extension just touched (an import, the session probe), with when. */
-const ownWrites = new Map<string, number>();
-/** How long the cookie changes of an import or a probe are not taken for a new session. */
+/** Per host: until when cookie changes are this extension's own doing (an import, a probe). */
+const quietUntil = new Map<string, number>();
+/** Session probes in flight per host: their own cookie changes are quiet too. */
+const probing = new Map<string, number>();
+/** How long the cookie changes of an import are not taken for a new session. */
 export const OWN_WRITE_QUIET_MS = 10_000;
+/** After a probe settles, its late cookie changes are quiet this long (no longer: a hand login may follow). */
+export const PROBE_QUIET_AFTER_MS = 1_000;
 
 /** Test seam: forget every quiet window. */
 export function forgetOwnCookieActivity(): void {
-  ownWrites.clear();
+  quietUntil.clear();
+  probing.clear();
 }
 
-/** Open the quiet window for a host: cookie changes in it are this extension's own doing. */
+function quietFor(host: string, ms: number, now: number = Date.now()): void {
+  quietUntil.set(host, Math.max(quietUntil.get(host) ?? 0, now + ms));
+}
+
+/** An import wrote the host's cookies: its cookie changes are quiet for OWN_WRITE_QUIET_MS. */
 export function markOwnCookieActivity(host: string, now: number = Date.now()): void {
-  ownWrites.set(host, now);
+  quietFor(host, OWN_WRITE_QUIET_MS, now);
 }
 
-/** Whether this extension wrote the host's cookies in the last OWN_WRITE_QUIET_MS. */
+/** Whether a cookie change of the host now is this extension's own doing. */
 export function ownWriteRecent(host: string, now: number = Date.now()): boolean {
-  const at = ownWrites.get(host);
-  return at !== undefined && now - at < OWN_WRITE_QUIET_MS;
+  return (probing.get(host) ?? 0) > 0 || now < (quietUntil.get(host) ?? 0);
 }
 
 export interface NsCookie {
@@ -136,8 +144,9 @@ export async function probeNsSession(payload: any): Promise<{ state: NsSessionSt
   const host = accountHost(payload);
   let response: Response;
   // The probe's own request may make NetSuite set a cookie (a login page
-  // issues a fresh JSESSIONID): that is not a new session to publish.
-  markOwnCookieActivity(host);
+  // issues a fresh JSESSIONID): that is not a new session to publish. Quiet
+  // only while it runs and briefly after.
+  probing.set(host, (probing.get(host) ?? 0) + 1);
   try {
     response = await fetch(`https://${host}/app/center/card.nl`, {
       credentials: 'include',
@@ -147,7 +156,8 @@ export async function probeNsSession(payload: any): Promise<{ state: NsSessionSt
   } catch {
     return { state: 'unknown' };
   } finally {
-    markOwnCookieActivity(host);
+    probing.set(host, Math.max(0, (probing.get(host) ?? 1) - 1));
+    quietFor(host, PROBE_QUIET_AFTER_MS);
   }
   // Only the URL matters: never read (or keep) the page.
   try {

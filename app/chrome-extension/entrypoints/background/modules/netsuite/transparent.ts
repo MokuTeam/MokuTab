@@ -30,6 +30,8 @@ export const FETCH_LANDING_MS = 60_000;
 /** Activity: at most one report per host in this window (the bridge throttles further). */
 export const ACTIVITY_EVERY_MS = 30_000;
 export const LANDING_TIMEOUT_MS = 30_000;
+/** The bridge may wait up to 30 s for a tab to tell the user before it publishes. */
+export const CHANGE_TIMEOUT_MS = 45_000;
 
 const LOGIN_PATH = /\/app\/login\/|\/pages\/customerlogin|loginchallenge|\/next\/app\/login\//i;
 const LANDING_PATH =
@@ -119,7 +121,11 @@ export class NsWatcher {
         this.lastChangeSent.set(host, now);
         const step = this.loginSteps.get(host);
         const afterLogin = step !== undefined && now - step < LOGIN_STEP_WINDOW_MS;
-        void this.send(NativeMessageType.NS_SESSION_CHANGED, { host, after_login: afterLogin });
+        void this.send(
+          NativeMessageType.NS_SESSION_CHANGED,
+          { host, after_login: afterLogin },
+          CHANGE_TIMEOUT_MS,
+        );
       }, delay),
     );
   }
@@ -177,8 +183,9 @@ export class NsWatcher {
     type: string;
     initiator?: string;
   }) {
-    // A tab's own navigation is a landing in onCommitted; images and scripts say nothing.
-    if (details.type !== 'xmlhttprequest' && details.type !== 'sub_frame') return;
+    // Background requests only: a tab's or a frame's own navigation is a landing
+    // in onCommitted, and images and scripts say nothing.
+    if (details.type !== 'xmlhttprequest') return;
     if (details.initiator && details.initiator.startsWith(this.env.ownOrigin)) return;
     const to = parse(details.redirectUrl);
     const host = accountHostOf(to);
