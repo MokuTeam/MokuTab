@@ -599,6 +599,7 @@ describe('netsuite_session_* tools', () => {
           until: 'T2',
         },
       },
+      { status: 200, body: { ok: true, lock_id: 'L3', until: 'T3' } },
     ];
     const { tools, store } = toolsWith({
       'POST /lock': () => answers.shift()!,
@@ -653,6 +654,14 @@ describe('netsuite_session_* tools', () => {
         ),
       ).state,
     ).toBe('unlocked');
+    // A lock without a run_id gets one (the store needs it in every holder),
+    // and the unlock sends the same one back.
+    const before = store.calls.length;
+    await tools.call('netsuite_session_lock', { account: '1234567_SB2', user: 'c@d.e' }, 'work');
+    await tools.call('netsuite_session_unlock', { account: '1234567_SB2', user: 'c@d.e' }, 'work');
+    const autoLock = store.calls[before].body.holder;
+    expect(autoLock.run_id).toMatch(/^auto-/);
+    expect(store.calls[before + 1].body.holder).toEqual(autoLock);
     const noUser = await tools.call('netsuite_session_lock', { account: '1234567' }, 'work');
     expect(parse(noUser).error.code).toBe('UserRequired');
   });

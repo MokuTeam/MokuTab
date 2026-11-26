@@ -9,6 +9,7 @@
  * says user_source: vault instead.
  */
 
+import { randomUUID } from 'crypto';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { NETSUITE_TOOL_NAMES } from '@mokuhub/mokutab-shared';
 import { scrubSecrets, type VaultUri } from '../../mcp/fn-vault';
@@ -167,6 +168,20 @@ function lockKey(account: string, user: string, profile: string): string {
 export class NsSessionTools {
   /** lock_id per (account, user, profile) from the last lock, sent back on unlock. */
   private readonly lockIds = new Map<string, string>();
+  /**
+   * The run_id a lock was taken with when the caller named none: the store
+   * needs one in every holder, and a relock or unlock must send the same.
+   */
+  private readonly runIds = new Map<string, string>();
+
+  private runIdFor(key: string, given: unknown, create: boolean): string | undefined {
+    if (typeof given === 'string' && given) return given;
+    const known = this.runIds.get(key);
+    if (known || !create) return known;
+    const made = `auto-${randomUUID()}`;
+    this.runIds.set(key, made);
+    return made;
+  }
 
   /** Checked vault usernames by item and host, with when they were read. */
   private readonly vaultUsers = new Map<string, { user: string | null; at: number }>();
@@ -570,11 +585,12 @@ export class NsSessionTools {
     const who = await this.who(args, account, profile);
     if (!who.user) throw new ToolRefusal('UserRequired', 'the lock needs user or vault_item');
     const ttl = Math.max(10, Math.min(120, Number(args.ttl_s) || 120));
+    const runId = this.runIdFor(lockKey(account.account, who.user, profile), args.run_id, true);
     const answer = await this.deps.store.request('POST', '/lock', {
       body: {
         account: account.account,
         user: who.user,
-        holder: this.holder(profile, args.run_id),
+        holder: this.holder(profile, runId),
         ttl_s: ttl,
       },
       profile,
@@ -611,14 +627,16 @@ export class NsSessionTools {
     if (!who.user) throw new ToolRefusal('UserRequired', 'the unlock needs user or vault_item');
     const key = lockKey(account.account, who.user, profile);
     const lockId = this.lockIds.get(key);
+    const runId = this.runIdFor(key, args.run_id, false);
     this.lockIds.delete(key);
+    this.runIds.delete(key);
     // Both the handle and the holder: the store matches on whichever it keeps.
     const answer = await this.deps.store.request('POST', '/unlock', {
       body: {
         account: account.account,
         user: who.user,
         ...(lockId ? { lock_id: lockId } : {}),
-        holder: this.holder(profile, args.run_id),
+        holder: this.holder(profile, runId),
       },
       profile,
     });

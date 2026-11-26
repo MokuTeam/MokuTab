@@ -68,7 +68,8 @@ export interface FnDriver {
 export interface TraceEntry {
   step: string;
   type: string;
-  status: 'ok' | 'skipped' | 'failed';
+  /** failed_optional: an optional step failed; its value is {state: 'error', error} and the run went on. */
+  status: 'ok' | 'skipped' | 'failed' | 'failed_optional';
   ms: number;
   note?: string;
 }
@@ -329,11 +330,15 @@ export class FnRunner {
         }
         const outcome = await this.execute(state, step);
         if (step.commit) state.committed = true;
+        const value = state.prev[step.id] as { state?: unknown; error?: unknown } | undefined;
+        const optionalFailed =
+          !!step.optional && !!value && value.state === 'error' && typeof value.error === 'string';
         state.trace.push({
           step: step.id,
           type: step.type,
-          status: 'ok',
+          status: optionalFailed ? 'failed_optional' : 'ok',
           ms: this.driver.now() - started,
+          ...(optionalFailed ? { note: String(value!.error).slice(0, 300) } : {}),
           ...(outcome?.status === 'paused' ? { note: 'paused' } : {}),
         });
         if (outcome) {
