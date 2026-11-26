@@ -40,6 +40,7 @@ export enum NativeMessageType {
   NS_COOKIES_READ = 'ns_cookies_read',
   NS_COOKIES_WRITE = 'ns_cookies_write',
   NS_TAB_IDENTITY = 'ns_tab_identity',
+  NS_SESSION_PROBE = 'ns_session_probe',
 }
 
 /** One installed module and whether it is on, as the bridge reports it. */

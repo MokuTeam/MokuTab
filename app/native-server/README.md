@@ -60,6 +60,11 @@ The `netsuite` module (off by default, switched on in the popup) is a client of 
 - A 503, a timeout, any 5xx or a body that is not JSON is `no_store` (backs off 30 s): callers behave as without a store. `409 store_full` on a publish counts as `no_store`.
 - Cookie values move only between the bridge and the extension (typed `ns_cookies_read` / `ns_cookies_write` / `ns_tab_identity` messages, not tools) and between the bridge and the store. Tool results carry names, states and an 8-char fingerprint (sha256 of `JSESSIONID`).
 - Which user a profile expects per account is kept in `<state dir>/ns-expected-users.json` (names only). With two live users for one account, `ensure` takes the most recently active one and says so.
+- A call that names no profile, with no pinned session and several profiles connected, is refused (`ProfileRequired`): a session never lands in whichever profile is the default.
+- `vault_item` is read only when the item is a login for the account's host, and a username read from it is never echoed (`user_source: "vault"`).
+- Before `already_live` and before a publish the extension checks that the session is logged in (card.nl with the profile's cookies must not end on a login page). A logged-out session is not published (`no_session`); on `ensure` it is reported dead and the answer is `none`. `partial_import` means Chrome refused some cookies.
+- The extension asks for the `cookies` permission for this module (installed with the extension, used only while the module is on and the bridge said so).
+- An extension older than the bridge answers an unknown request type at once, and the bridge waits at most 5 s (12 s for the session check) for these requests.
 - `netsuite.login` v14 (a vault function in the registry) uses these tools from its steps; it needs this bridge.
 
 ## Development

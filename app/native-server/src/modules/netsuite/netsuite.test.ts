@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { accountFromHost, fingerprint, normalizeAccount } from './account';
 import { ExpectedUsers } from './expected-users';
-import { NsSessionTools, type NsCookie, type NsDeps } from './session-tools';
+import { NsSessionTools, untilMs, type NsCookie, type NsDeps } from './session-tools';
 import { NsStoreClient, parseTokenFile, type StoreIo } from './store-client';
 
 const SECRET = 'JSESS-VALUE-0123456789abcdef';
@@ -82,17 +82,25 @@ function clientWith(fetchFn: typeof fetch, extra: Partial<StoreIo> = {}) {
     env: {},
     ...extra,
   };
-  const client = new NsStoreClient(() => '/state/ns-store-token', io, 'mokutab test');
+  const client = new NsStoreClient(() => '/state/ns-store-token', io, {
+    version: '9.9.9',
+    machine: 'laptop',
+  });
   return { client, logs, advance: (ms: number) => (clock += ms) };
 }
 
 describe('store client', () => {
   test('token file: line 1 token, optional line 2 base URL', () => {
     expect(parseTokenFile('abc\n')).toEqual({ token: 'abc' });
-    expect(parseTokenFile('abc\r\nhttp://10.0.0.2:12422/api/ns-sessions/\n')).toEqual({
+    expect(parseTokenFile('abc\r\nhttp://127.0.0.1:12423/api/ns-sessions/\n')).toEqual({
       token: 'abc',
-      base: 'http://10.0.0.2:12422/api/ns-sessions',
+      base: 'http://127.0.0.1:12423/api/ns-sessions',
     });
+    // A base URL off this machine is ignored.
+    expect(parseTokenFile('abc\nhttp://10.0.0.2:12422/api/ns-sessions\n')).toEqual({
+      token: 'abc',
+    });
+    expect(parseTokenFile('abc\nhttps://localhost.evil.net/x\n')).toEqual({ token: 'abc' });
     expect(parseTokenFile('')).toBeNull();
     expect(parseTokenFile('two words')).toBeNull();
   });
@@ -113,7 +121,7 @@ describe('store client', () => {
     await client.request('GET', '/list');
     expect(calls.map((c) => c.headers['X-NS-Store-Token'])).toEqual(['first', 'first', 'second']);
     expect(calls[0].headers['X-Board']).toBe('1');
-    expect(calls[0].headers['X-NS-Store-Client']).toBe('mokutab test');
+    expect(calls[0].headers['X-NS-Store-Client']).toBe('mokutab/9.9.9 laptop/-');
   });
 
   test('MOKUTAB_NS_STORE_URL overrides the base URL', async () => {
@@ -171,39 +179,69 @@ interface FakeBrowser {
   cookies: NsCookie[];
   written: NsCookie[][];
   identity: { user: string | null; role: string | null; role_id: string | null } | null;
+  alive: boolean;
 }
+
+const ITEM = '081555dc-d350-485b-99ae-b4ed017046b4';
 
 function toolsWith(
   routes: Parameters<typeof fakeStore>[0],
   browser: Partial<FakeBrowser> = {},
-  opts: { tokenMissing?: boolean; usersFile?: string; failWrite?: boolean } = {},
+  opts: {
+    tokenMissing?: boolean;
+    failWrite?: boolean;
+    partialWrite?: boolean;
+    profiles?: string[];
+    vaultUris?: string[];
+  } = {},
 ) {
   const store = fakeStore(routes);
   const { client, logs } = clientWith(
     store.fetchFn,
     opts.tokenMissing ? { mtime: () => null } : {},
   );
-  const b: FakeBrowser = { cookies: [], written: [], identity: null, ...browser };
-  const usersFile =
-    opts.usersFile ?? path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ns-users-')), 'u.json');
+  const b: FakeBrowser = { cookies: [], written: [], identity: null, alive: true, ...browser };
+  const usersFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ns-users-')), 'u.json');
   let clock = Date.parse('2026-11-26T15:00:00Z');
   const sleeps: number[] = [];
+  const touched: string[] = [];
   const deps: NsDeps = {
     store: client,
     users: new ExpectedUsers(
       () => usersFile,
       () => clock,
     ),
-    readCookies: async () => b.cookies,
+    readCookies: async () => {
+      touched.push('readCookies');
+      return b.cookies;
+    },
     writeCookies: async (_p, _h, cookies) => {
+      touched.push('writeCookies');
       if (opts.failWrite) throw new Error(`chrome refused ${cookies[0]?.value}`);
       b.written.push(cookies);
       b.cookies = cookies;
-      return cookies.length;
+      return opts.partialWrite ? cookies.length - 1 : cookies.length;
     },
-    tabIdentity: async () => b.identity,
-    vaultUsername: async () => 'Support_BGC@example.com',
-    resolveProfile: (p) => p ?? 'work',
+    tabIdentity: async () => {
+      touched.push('tabIdentity');
+      return b.identity;
+    },
+    sessionAlive: async () => {
+      touched.push('sessionAlive');
+      return b.alive;
+    },
+    vaultUris: async () => {
+      touched.push('vaultUris');
+      return (opts.vaultUris ?? ['https://system.netsuite.com']).map((uri) => ({
+        uri,
+        match: null,
+      }));
+    },
+    vaultUsername: async () => {
+      touched.push('vaultUsername');
+      return 'Support_BGC@example.com';
+    },
+    connectedProfiles: () => opts.profiles ?? ['work'],
     machine: 'laptop',
     sleep: async (ms) => {
       sleeps.push(ms);
@@ -211,7 +249,15 @@ function toolsWith(
     },
     now: () => clock,
   };
-  return { tools: new NsSessionTools(deps), store, browser: b, logs, sleeps, users: deps.users };
+  return {
+    tools: new NsSessionTools(deps),
+    store,
+    browser: b,
+    logs,
+    sleeps,
+    users: deps.users,
+    touched,
+  };
 }
 
 const parse = (result: any) => JSON.parse(result.content[0].text);
@@ -225,28 +271,47 @@ const entryBody = (over: any = {}) => ({
   cookies: [cookie('JSESSIONID', SECRET), cookie('NS_ROUTING', OTHER, '.' + HOST)],
   ...over,
 });
+const ALL = [
+  'netsuite_session_status',
+  'netsuite_session_ensure',
+  'netsuite_session_publish',
+  'netsuite_session_lock',
+  'netsuite_session_unlock',
+];
 
 describe('netsuite_session_* tools', () => {
-  test('without a token every tool says store_unconfigured', async () => {
-    const { tools } = toolsWith({}, {}, { tokenMissing: true });
-    for (const name of [
-      'netsuite_session_status',
-      'netsuite_session_ensure',
-      'netsuite_session_publish',
-      'netsuite_session_lock',
-      'netsuite_session_unlock',
-    ]) {
-      const out = parse(await tools.call(name, { account: '1234567_SB2', user: 'a@b.c' }, null));
-      expect(
-        name === 'netsuite_session_publish'
-          ? ['store_unconfigured', 'no_session']
-          : ['store_unconfigured'],
-      ).toContain(out.state);
+  test('without a token every tool says store_unconfigured and touches nothing', async () => {
+    const { tools, touched, store } = toolsWith(
+      {},
+      {},
+      { tokenMissing: true, profiles: ['a', 'b'] },
+    );
+    for (const name of ALL) {
+      const out = parse(await tools.call(name, { account: '1234567_SB2', vault_item: ITEM }, null));
+      expect(out.state).toBe('store_unconfigured');
     }
+    expect(touched).toEqual([]);
+    expect(store.calls).toEqual([]);
+  });
+
+  test('while backing off after a failure, tools answer no_store without reading anything', async () => {
+    const { tools, touched, store } = toolsWith({ 'GET /entry': () => ({ status: 503 }) });
+    expect(
+      parse(await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work'))
+        .state,
+    ).toBe('no_store');
+    touched.length = 0;
+    for (const name of ALL) {
+      expect(
+        parse(await tools.call(name, { account: '1234567_SB2', user: 'a@b.c' }, 'work')).state,
+      ).toBe('no_store');
+    }
+    expect(touched).toEqual([]);
+    expect(store.calls).toHaveLength(1);
   });
 
   test('status lists metadata and drops anything value-shaped', async () => {
-    const { tools, store } = toolsWith({
+    const { tools } = toolsWith({
       'GET /list': () => ({
         status: 200,
         body: {
@@ -265,12 +330,28 @@ describe('netsuite_session_* tools', () => {
       account: '1234567_SB2',
       entries: [{ account: '1234567_SB2', fp: 'abcd1234' }],
     });
-    expect(store.calls[0].route).toBe('/list');
   });
 
-  test('ensure imports the live session and remembers the user', async () => {
-    const { tools, browser, users } = toolsWith({
+  test('several profiles connected and none named: ProfileRequired, nothing imported', async () => {
+    const { tools, browser } = toolsWith(
+      { 'GET /entry': () => ({ status: 200, body: entryBody() }) },
+      {},
+      { profiles: ['personal', 'work'] },
+    );
+    const out = await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, null);
+    expect(out.isError).toBe(true);
+    expect(parse(out).error.code).toBe('ProfileRequired');
+    expect(browser.written).toEqual([]);
+    expect(
+      parse(await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work'))
+        .state,
+    ).toBe('imported');
+  });
+
+  test('ensure imports the live session; already_live only when the local session is logged in', async () => {
+    const { tools, browser, users, store } = toolsWith({
       'GET /entry': () => ({ status: 200, body: entryBody() }),
+      'POST /dead': () => ({ status: 200, body: { ok: true, matched: true } }),
     });
     const result = await tools.call(
       'netsuite_session_ensure',
@@ -278,45 +359,81 @@ describe('netsuite_session_* tools', () => {
       'work',
     );
     const out = parse(result);
-    expect(out.state).toBe('imported');
-    expect(out.fp).toBe(fingerprint(SECRET));
-    expect(out.cookies_set).toBe(2);
-    expect(browser.written).toHaveLength(1);
+    expect(out).toMatchObject({
+      state: 'imported',
+      fp: fingerprint(SECRET),
+      cookies_set: 2,
+      user: 'support_bgc@example.com',
+    });
     expect(JSON.stringify(result)).not.toContain(SECRET);
     expect(JSON.stringify(result)).not.toContain(OTHER);
     expect(users.get('work', '1234567_SB2')).toBe('support_bgc@example.com');
 
-    const again = parse(
+    expect(
+      parse(await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work'))
+        .state,
+    ).toBe('already_live');
+    browser.alive = false;
+    const dead = parse(
       await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work'),
     );
-    expect(again.state).toBe('already_live');
+    expect(dead.state).toBe('none');
+    expect(store.calls.find((c) => c.route === '/dead')?.body).toMatchObject({
+      fp: fingerprint(SECRET),
+      reason: 'login_redirect',
+    });
     expect(browser.written).toHaveLength(1);
   });
 
-  test('ensure asks for the vault user, or the remembered one', async () => {
+  test('a partial import is partial_import and the user is not remembered', async () => {
+    const { tools, users } = toolsWith(
+      { 'GET /entry': () => ({ status: 200, body: entryBody() }) },
+      {},
+      { partialWrite: true },
+    );
+    const out = parse(
+      await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work'),
+    );
+    expect(out).toMatchObject({ state: 'partial_import', cookies_set: 1, cookies_total: 2 });
+    expect(users.get('work', '1234567_SB2')).toBeNull();
+  });
+
+  test('a vault user is read only for an item of this account, and never echoed', async () => {
     const asked: Array<string | null> = [];
-    const { tools, users } = toolsWith({
+    const { tools, touched } = toolsWith({
       'GET /entry': (_b, q) => {
         asked.push(q.get('user'));
         return { status: 200, body: entryBody() };
       },
     });
-    await tools.call(
+    const result = await tools.call(
       'netsuite_session_ensure',
-      { account: '1234567_SB2', vault_item: '081555dc-d350-485b-99ae-b4ed017046b4' },
+      { account: '1234567_SB2', vault_item: ITEM },
       'work',
     );
-    users.set('bb', '1234567_SB2', 'other@example.com');
-    await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'bb');
-    expect(asked).toEqual(['support_bgc@example.com', 'other@example.com']);
+    const out = parse(result);
+    expect(asked).toEqual(['support_bgc@example.com']);
+    expect(out.user_source).toBe('vault');
+    expect(out.user).toBeUndefined();
+    expect(JSON.stringify(result).toLowerCase()).not.toContain('support_bgc');
+
+    const other = toolsWith({}, {}, { vaultUris: ['https://mail.example.com'] });
+    const refused = await other.tools.call(
+      'netsuite_session_lock',
+      { account: '1234567_SB2', vault_item: ITEM },
+      'work',
+    );
+    expect(parse(refused).error.code).toBe('VaultItemMismatch');
+    expect(other.touched).toEqual(['vaultUris']);
+    expect(touched).toContain('vaultUris');
   });
 
-  test('ensure: none, or locked_by another machine; wait_for_lock polls every 3 s', async () => {
+  test('ensure: locked_by another machine; wait_for_lock polls every 3 s with an epoch-ms until', async () => {
     let polls = 0;
-    const lockUntil = new Date(Date.parse('2026-11-26T15:00:00Z') + 9_000).toISOString();
-    const { tools, sleeps } = toolsWith({
+    const lockUntil = Date.parse('2026-11-26T15:00:00Z') + 9_000;
+    const { tools, sleeps, touched } = toolsWith({
       'GET /entry': () =>
-        polls++ < 2
+        polls++ < 3
           ? { status: 404, body: { ok: false, code: 'none' } }
           : { status: 200, body: entryBody() },
       'GET /list': () => ({
@@ -341,22 +458,18 @@ describe('netsuite_session_* tools', () => {
       holder: { machine: 'server-2' },
       until: lockUntil,
     });
+    touched.length = 0;
     const waited = parse(
       await tools.call(
         'netsuite_session_ensure',
-        { account: '1234567_SB2', wait_for_lock: true },
+        { account: '1234567_SB2', vault_item: ITEM, wait_for_lock: true },
         'work',
       ),
     );
     expect(waited.state).toBe('imported');
-    expect(sleeps).toEqual([3_000]);
-
-    const { tools: empty } = toolsWith({
-      'GET /list': () => ({ status: 200, body: { ok: true, entries: [] } }),
-    });
-    expect(
-      parse(await empty.call('netsuite_session_ensure', { account: '1234567_SB2' }, null)).state,
-    ).toBe('none');
+    expect(sleeps).toEqual([3_000, 3_000]);
+    // The vault is read once per call, not once per poll.
+    expect(touched.filter((t) => t === 'vaultUsername')).toHaveLength(1);
   });
 
   test('ensure: two live users, the most recently active one is taken and remembered', async () => {
@@ -379,13 +492,12 @@ describe('netsuite_session_* tools', () => {
     const out = parse(
       await tools.call('netsuite_session_ensure', { account: '9089979' }, 'work'),
     );
-    expect(out.state).toBe('imported');
-    expect(out.user).toBe('new@example.com');
+    expect(out).toMatchObject({ state: 'imported', user: 'new@example.com' });
     expect(out.note).toMatch(/most recently active/);
     expect(users.get('work', '9089979')).toBe('new@example.com');
   });
 
-  test('publish: no_session, published, unchanged, dead_session, store_full', async () => {
+  test('publish: no session, a logged-out session (nothing sent), published, unchanged, dead, full', async () => {
     const answers = [
       { status: 200, body: { ok: true, stored: true, generation: 5 } },
       { status: 200, body: { ok: true, stored: false, generation: 5 } },
@@ -394,10 +506,21 @@ describe('netsuite_session_* tools', () => {
     ];
     const { tools, store, browser } = toolsWith({ 'POST /entry': () => answers.shift()! });
     expect(
-      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, null)).state,
+      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work'))
+        .state,
     ).toBe('no_session');
-    browser.cookies = [cookie('JSESSIONID', SECRET), cookie('NS_ROUTING', OTHER, '.' + HOST)];
-    browser.identity = { user: 'Support_BGC@example.com', role: '3', role_id: 'administrator' };
+    browser.cookies = [
+      { ...cookie('JSESSIONID', SECRET), hostOnly: true },
+      cookie('NS_ROUTING', OTHER, '.' + HOST),
+    ];
+    browser.alive = false;
+    expect(
+      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work'))
+        .state,
+    ).toBe('no_session');
+    expect(store.calls).toEqual([]);
+    browser.alive = true;
+    browser.identity = { user: 'Tab.User@example.com', role: '3', role_id: 'administrator' };
     const published = await tools.call(
       'netsuite_session_publish',
       { account: '1234567_SB2', login_at: true },
@@ -405,7 +528,8 @@ describe('netsuite_session_* tools', () => {
     );
     expect(parse(published)).toMatchObject({
       state: 'published',
-      user: 'support_bgc@example.com',
+      user: 'tab.user@example.com',
+      user_source: 'tab',
       fp: fingerprint(SECRET),
       generation: 5,
     });
@@ -414,19 +538,41 @@ describe('netsuite_session_* tools', () => {
     expect(sent).toMatchObject({
       account: '1234567_SB2',
       host: HOST,
-      fp: fingerprint(SECRET),
       origin: { machine: 'laptop', profile: 'work' },
     });
-    expect(typeof sent.login_at).toBe('number');
+    expect(sent.cookies.every((c: any) => !('hostOnly' in c))).toBe(true);
+    expect(store.calls[0].headers['X-NS-Store-Client']).toBe('mokutab/9.9.9 laptop/work');
+    // With a vault item the publish is keyed by the vault user, as ensure and lock are.
+    const viaVault = parse(
+      await tools.call(
+        'netsuite_session_publish',
+        { account: '1234567_SB2', vault_item: ITEM },
+        'work',
+      ),
+    );
+    expect(viaVault).toMatchObject({ state: 'unchanged', user_source: 'vault' });
+    expect(store.calls[1].body.user).toBe('support_bgc@example.com');
     expect(
-      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, null)).state,
-    ).toBe('unchanged');
-    expect(
-      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, null)).state,
+      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work'))
+        .state,
     ).toBe('dead_session');
     expect(
-      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, null)).state,
+      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work'))
+        .state,
     ).toBe('no_store');
+  });
+
+  test('a cookie value equal to a state word never rewrites the state', async () => {
+    const { tools } = toolsWith({
+      'GET /entry': () => ({
+        status: 200,
+        body: entryBody({ cookies: [cookie('JSESSIONID', 'imported'), cookie('X', 'none')] }),
+      }),
+    });
+    const out = parse(
+      await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work'),
+    );
+    expect(out.state).toBe('imported');
   });
 
   test('lock and unlock carry the holder; a held lock is locked_by', async () => {
@@ -449,19 +595,14 @@ describe('netsuite_session_* tools', () => {
     const locked = parse(
       await tools.call(
         'netsuite_session_lock',
-        {
-          account: '1234567_SB2',
-          vault_item: '081555dc-d350-485b-99ae-b4ed017046b4',
-          run_id: 'R1',
-          ttl_s: 500,
-        },
+        { account: '1234567_SB2', vault_item: ITEM, run_id: 'R1', ttl_s: 500 },
         'work',
       ),
     );
     expect(locked).toEqual({
       state: 'locked',
       account: '1234567_SB2',
-      user: 'support_bgc@example.com',
+      user_source: 'vault',
       until: 'T1',
     });
     expect(store.calls[0].body).toEqual({
@@ -489,7 +630,6 @@ describe('netsuite_session_* tools', () => {
       ).state,
     ).toBe('unlocked');
     const noUser = await tools.call('netsuite_session_lock', { account: '1234567' }, 'work');
-    expect(noUser.isError).toBe(true);
     expect(parse(noUser).error.code).toBe('UserRequired');
   });
 
@@ -499,13 +639,35 @@ describe('netsuite_session_* tools', () => {
       {},
       { failWrite: true },
     );
-    const bad = await tools.call('netsuite_session_ensure', { account: 'system' }, null);
-    expect(parse(bad).error.code).toBe('InvalidAccount');
-    const failed = await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, null);
+    expect(
+      parse(await tools.call('netsuite_session_ensure', { account: 'system' }, null)).error.code,
+    ).toBe('InvalidAccount');
+    const failed = await tools.call(
+      'netsuite_session_ensure',
+      { account: '1234567_SB2' },
+      'work',
+    );
     expect(failed.isError).toBe(true);
     const text = JSON.stringify(failed);
     expect(text).toContain('chrome refused');
     expect(text).not.toContain(SECRET);
     expect(logs.join('\n')).not.toContain(SECRET);
+  });
+});
+
+describe('until and Test Drive ids', () => {
+  test('untilMs takes epoch ms, numeric strings and ISO dates', () => {
+    expect(untilMs(1795700000000)).toBe(1795700000000);
+    expect(untilMs('1795700000000')).toBe(1795700000000);
+    expect(untilMs('2026-11-26T15:00:09.000Z')).toBe(Date.parse('2026-11-26T15:00:09.000Z'));
+    expect(untilMs(undefined)).toBeNaN();
+  });
+
+  test('tstdrv accounts', () => {
+    expect(normalizeAccount('TSTDRV1234567')).toEqual({
+      account: 'TSTDRV1234567',
+      host: 'tstdrv1234567.app.netsuite.com',
+    });
+    expect(accountFromHost('tstdrv1234567.app.netsuite.com')?.account).toBe('TSTDRV1234567');
   });
 });

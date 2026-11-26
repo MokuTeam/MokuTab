@@ -11,7 +11,8 @@ export interface NsAccount {
   host: string;
 }
 
-const ACCOUNT = /^([0-9]+|[Tt][Dd][0-9]+)(?:[_-]([A-Za-z0-9]+))?$/;
+/** Production and sandbox ids, Test Drive td<digits> and tstdrv<digits>, any case. */
+const ACCOUNT = /^([0-9]+|td[0-9]+|tstdrv[0-9]+)(?:[_-]([a-z0-9]+))?$/i;
 const HOST = /^([0-9a-z]+(?:-[0-9a-z]+)?)\.app\.netsuite\.com$/i;
 
 export function normalizeAccount(input: unknown): NsAccount | null {

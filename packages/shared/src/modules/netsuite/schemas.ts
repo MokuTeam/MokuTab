@@ -21,8 +21,9 @@ export const NETSUITE_TOOL_SCHEMAS: Tool[] = [
         account: {
           ...{
             type: 'string',
-            pattern: '^([0-9]+|[Tt][Dd][0-9]+)([_-][A-Za-z0-9]+)?$',
-            description: 'NetSuite account id: 1234567, 1234567_SB2, td3125712 (any case).',
+            pattern: '^([0-9]+|[Tt][Dd][0-9]+|[Tt][Ss][Tt][Dd][Rr][Vv][0-9]+)([_-][A-Za-z0-9]+)?$',
+            description:
+              'NetSuite account id: 1234567, 1234567_SB2, td3125712, tstdrv1234567 (any case).',
           },
           description: 'Only this account.',
         },
@@ -34,18 +35,21 @@ export const NETSUITE_TOOL_SCHEMAS: Tool[] = [
     description:
       "Give this Chrome profile the store's live session for an account, so it needs no login. " +
       'Returns state imported (cookies set in the profile; reload the NetSuite page), ' +
+      'partial_import (Chrome refused some cookies), ' +
       'already_live (the profile already has that session), none (nothing alive: log in, then ' +
       'netsuite_session_publish), locked_by {holder, until} (another machine is logging in), ' +
       'store_unconfigured or no_store (no store: behave as without it). The user is the vault ' +
-      "item's username when vault_item is given, else the one this profile used last for the " +
+      "item's username when vault_item is given (only an item for this account's site; the name " +
+      'is not echoed, user_source: vault), else the one this profile used last for the ' +
       'account, else the only live one. Never returns a cookie value.',
     inputSchema: {
       type: 'object',
       properties: {
         account: {
           type: 'string',
-          pattern: '^([0-9]+|[Tt][Dd][0-9]+)([_-][A-Za-z0-9]+)?$',
-          description: 'NetSuite account id: 1234567, 1234567_SB2, td3125712 (any case).',
+          pattern: '^([0-9]+|[Tt][Dd][0-9]+|[Tt][Ss][Tt][Dd][Rr][Vv][0-9]+)([_-][A-Za-z0-9]+)?$',
+          description:
+            'NetSuite account id: 1234567, 1234567_SB2, td3125712, tstdrv1234567 (any case).',
         },
         user: { type: 'string', description: 'NetSuite user email to take the session of.' },
         vault_item: {
@@ -76,8 +80,9 @@ export const NETSUITE_TOOL_SCHEMAS: Tool[] = [
       properties: {
         account: {
           type: 'string',
-          pattern: '^([0-9]+|[Tt][Dd][0-9]+)([_-][A-Za-z0-9]+)?$',
-          description: 'NetSuite account id: 1234567, 1234567_SB2, td3125712 (any case).',
+          pattern: '^([0-9]+|[Tt][Dd][0-9]+|[Tt][Ss][Tt][Dd][Rr][Vv][0-9]+)([_-][A-Za-z0-9]+)?$',
+          description:
+            'NetSuite account id: 1234567, 1234567_SB2, td3125712, tstdrv1234567 (any case).',
         },
         user: {
           type: 'string',
@@ -108,8 +113,9 @@ export const NETSUITE_TOOL_SCHEMAS: Tool[] = [
       properties: {
         account: {
           type: 'string',
-          pattern: '^([0-9]+|[Tt][Dd][0-9]+)([_-][A-Za-z0-9]+)?$',
-          description: 'NetSuite account id: 1234567, 1234567_SB2, td3125712 (any case).',
+          pattern: '^([0-9]+|[Tt][Dd][0-9]+|[Tt][Ss][Tt][Dd][Rr][Vv][0-9]+)([_-][A-Za-z0-9]+)?$',
+          description:
+            'NetSuite account id: 1234567, 1234567_SB2, td3125712, tstdrv1234567 (any case).',
         },
         user: { type: 'string', description: 'NetSuite user email.' },
         vault_item: {
@@ -139,8 +145,9 @@ export const NETSUITE_TOOL_SCHEMAS: Tool[] = [
       properties: {
         account: {
           type: 'string',
-          pattern: '^([0-9]+|[Tt][Dd][0-9]+)([_-][A-Za-z0-9]+)?$',
-          description: 'NetSuite account id: 1234567, 1234567_SB2, td3125712 (any case).',
+          pattern: '^([0-9]+|[Tt][Dd][0-9]+|[Tt][Ss][Tt][Dd][Rr][Vv][0-9]+)([_-][A-Za-z0-9]+)?$',
+          description:
+            'NetSuite account id: 1234567, 1234567_SB2, td3125712, tstdrv1234567 (any case).',
         },
         user: { type: 'string', description: 'NetSuite user email.' },
         vault_item: {

@@ -53,6 +53,9 @@ const realIo = (): StoreIo => ({
   env: process.env,
 });
 
+/** http(s) on this machine only: 127.0.0.1, localhost or [::1]. */
+const LOOPBACK_URL = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/i;
+
 export interface StoreConfig {
   token: string;
   base: string;
@@ -65,8 +68,8 @@ export function parseTokenFile(text: string): { token: string; base?: string } |
     .map((line) => line.trim())
     .filter(Boolean);
   if (!lines[0] || /\s/.test(lines[0])) return null;
-  const base =
-    lines[1] && /^https?:\/\//i.test(lines[1]) ? lines[1].replace(/\/+$/, '') : undefined;
+  // The store host is this machine's own; a base URL elsewhere is ignored.
+  const base = lines[1] && LOOPBACK_URL.test(lines[1]) ? lines[1].replace(/\/+$/, '') : undefined;
   return { token: lines[0], ...(base ? { base } : {}) };
 }
 
@@ -79,7 +82,10 @@ export class NsStoreClient {
     private readonly tokenFile: () => string = () =>
       path.join(updateStateDir(), NS_STORE_TOKEN_FILE),
     io: Partial<StoreIo> = {},
-    private readonly client: string = `mokutab ${os.hostname()}`,
+    private readonly identity: { version: string; machine: string } = {
+      version: 'unknown',
+      machine: os.hostname(),
+    },
   ) {
     this.io = { ...realIo(), ...io };
   }
@@ -97,7 +103,8 @@ export class NsStoreClient {
     try {
       const parsed = parseTokenFile(this.io.readFile(file));
       if (parsed) {
-        const override = readEnv(NS_STORE_URL_ENV, this.io.env)?.trim().replace(/\/+$/, '');
+        const raw = readEnv(NS_STORE_URL_ENV, this.io.env)?.trim().replace(/\/+$/, '');
+        const override = raw && LOOPBACK_URL.test(raw) ? raw : undefined;
         config = { token: parsed.token, base: override || parsed.base || DEFAULT_NS_STORE_URL };
       }
     } catch {
@@ -107,13 +114,26 @@ export class NsStoreClient {
     return config;
   }
 
+  /**
+   * Without a request: unconfigured (no token file), no_store (backing off
+   * after a failure), or null when a request would be sent.
+   */
+  precheck(): StoreAnswer | null {
+    if (!this.config()) return { kind: 'unconfigured' };
+    if (this.io.now() < this.backoffUntil) {
+      return { kind: 'no_store', reason: 'the store did not answer a moment ago (backing off)' };
+    }
+    return null;
+  }
+
   async request(
     method: 'GET' | 'POST',
     route: string,
     options: {
       body?: unknown;
       query?: Record<string, string | undefined>;
-      clientTag?: string;
+      /** The Chrome profile the call is for (X-NS-Store-Client). */
+      profile?: string | null;
     } = {},
   ): Promise<StoreAnswer> {
     const config = this.config();
@@ -136,12 +156,12 @@ export class NsStoreClient {
         headers: {
           'X-NS-Store-Token': config.token,
           'X-Board': '1',
-          'X-NS-Store-Client': options.clientTag
-            ? `${this.client} ${options.clientTag}`
-            : this.client,
+          'X-NS-Store-Client': `mokutab/${this.identity.version} ${this.identity.machine}/${options.profile || '-'}`,
           ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         },
         body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+        // A redirect could carry a publish body (cookie values) elsewhere.
+        redirect: 'error',
         signal: controller.signal,
       });
       status = response.status;
