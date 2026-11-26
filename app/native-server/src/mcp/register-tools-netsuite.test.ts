@@ -47,16 +47,10 @@ describe('callModuleToolForFunction', () => {
 
   test('refuses a tool off the allowlist and a module that is off, without calling it', async () => {
     const seen: Array<{ name: string; profile: string | null }> = [];
-    const offList = await callModuleToolForFunction(
-      'netsuite_session_status',
-      {},
-      'work',
-      1000,
-      {
-        modules: [fakeModule(seen)],
-        switch: memorySwitch(),
-      },
-    );
+    const offList = await callModuleToolForFunction('netsuite_session_status', {}, 'work', 1000, {
+      modules: [fakeModule(seen)],
+      switch: memorySwitch(),
+    });
     expect(offList.isError).toBe(true);
     expect(text(offList)).toMatch(/may not be called from a browser function/);
     const off = await callModuleToolForFunction('netsuite_session_publish', {}, 'work', 1000, {

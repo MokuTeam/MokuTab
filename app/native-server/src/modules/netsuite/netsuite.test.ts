@@ -303,8 +303,7 @@ describe('netsuite_session_* tools', () => {
   test('while backing off after a failure, tools answer no_store without reading anything', async () => {
     const { tools, touched, store } = toolsWith({ 'GET /entry': () => ({ status: 503 }) });
     expect(
-      parse(await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work'))
-        .state,
+      parse(await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work')).state,
     ).toBe('no_store');
     touched.length = 0;
     for (const name of ALL) {
@@ -349,8 +348,7 @@ describe('netsuite_session_* tools', () => {
     expect(parse(out).error.code).toBe('ProfileRequired');
     expect(browser.written).toEqual([]);
     expect(
-      parse(await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work'))
-        .state,
+      parse(await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work')).state,
     ).toBe('imported');
   });
 
@@ -359,11 +357,7 @@ describe('netsuite_session_* tools', () => {
       'GET /entry': () => ({ status: 200, body: entryBody() }),
       'POST /dead': () => ({ status: 200, body: { ok: true, matched: true } }),
     });
-    const result = await tools.call(
-      'netsuite_session_ensure',
-      { account: '1234567_SB2' },
-      'work',
-    );
+    const result = await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work');
     const out = parse(result);
     expect(out).toMatchObject({
       state: 'imported',
@@ -376,8 +370,7 @@ describe('netsuite_session_* tools', () => {
     expect(users.get('work', '1234567_SB2')).toBe('support_bgc@example.com');
 
     expect(
-      parse(await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work'))
-        .state,
+      parse(await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work')).state,
     ).toBe('already_live');
     browser.probe = 'unknown';
     const unsure = parse(
@@ -501,9 +494,7 @@ describe('netsuite_session_* tools', () => {
               },
             },
     });
-    const out = parse(
-      await tools.call('netsuite_session_ensure', { account: '9089979' }, 'work'),
-    );
+    const out = parse(await tools.call('netsuite_session_ensure', { account: '9089979' }, 'work'));
     expect(out).toMatchObject({ state: 'imported', user: 'new@example.com' });
     expect(out.note).toMatch(/most recently active/);
     expect(users.get('work', '9089979')).toBe('new@example.com');
@@ -518,8 +509,7 @@ describe('netsuite_session_* tools', () => {
     ];
     const { tools, store, browser } = toolsWith({ 'POST /entry': () => answers.shift()! });
     expect(
-      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work'))
-        .state,
+      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work')).state,
     ).toBe('no_session');
     browser.cookies = [
       { ...cookie('JSESSIONID', SECRET), hostOnly: true },
@@ -527,13 +517,11 @@ describe('netsuite_session_* tools', () => {
     ];
     browser.probe = 'dead';
     expect(
-      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work'))
-        .state,
+      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work')).state,
     ).toBe('no_session');
     browser.probe = 'unknown';
     expect(
-      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work'))
-        .state,
+      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work')).state,
     ).toBe('probe_unknown');
     expect(store.calls).toEqual([]);
     browser.probe = 'alive';
@@ -579,12 +567,10 @@ describe('netsuite_session_* tools', () => {
     expect(viaVault).toMatchObject({ state: 'unchanged', user_source: 'vault' });
     expect(store.calls[1].body.user).toBe('support_bgc@example.com');
     expect(
-      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work'))
-        .state,
+      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work')).state,
     ).toBe('dead_session');
     expect(
-      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work'))
-        .state,
+      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work')).state,
     ).toBe('no_store');
   });
 
@@ -668,11 +654,7 @@ describe('netsuite_session_* tools', () => {
     expect(
       parse(await tools.call('netsuite_session_ensure', { account: 'system' }, null)).error.code,
     ).toBe('InvalidAccount');
-    const failed = await tools.call(
-      'netsuite_session_ensure',
-      { account: '1234567_SB2' },
-      'work',
-    );
+    const failed = await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work');
     expect(failed.isError).toBe(true);
     const text = JSON.stringify(failed);
     expect(text).toContain('chrome refused');
@@ -697,11 +679,7 @@ describe('vault checks', () => {
       'POST /lock': () => ({ status: 200, body: { ok: true, until: 1 } }),
       'POST /unlock': () => ({ status: 204 }),
     });
-    await tools.call(
-      'netsuite_session_lock',
-      { account: '1234567_SB2', vault_item: ITEM },
-      'work',
-    );
+    await tools.call('netsuite_session_lock', { account: '1234567_SB2', vault_item: ITEM }, 'work');
     await tools.call(
       'netsuite_session_unlock',
       { account: '1234567_SB2', vault_item: ITEM },
