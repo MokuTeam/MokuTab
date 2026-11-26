@@ -56,9 +56,14 @@ function liveTools(): NsSessionTools {
         const data = await ask(profile, NativeMessageType.NS_TAB_IDENTITY, { host });
         return (data?.identity ?? null) as TabIdentity | null;
       },
-      sessionAlive: async (profile, host) => {
-        const data = await ask(profile, NativeMessageType.NS_SESSION_PROBE, { host }, 12_000);
-        return data?.alive === true;
+      sessionState: async (profile, host) => {
+        try {
+          const data = await ask(profile, NativeMessageType.NS_SESSION_PROBE, { host }, 12_000);
+          return data?.state === 'alive' || data?.state === 'dead' ? data.state : 'unknown';
+        } catch {
+          // An extension without the probe, or one that did not answer: not known.
+          return 'unknown';
+        }
       },
       vaultUris: (item) => vault.uris(item),
       vaultUsername: (item) => vault.get(item, 'username'),

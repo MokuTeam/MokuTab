@@ -11,7 +11,7 @@
 
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { NETSUITE_TOOL_NAMES } from '@mokuhub/mokutab-shared';
-import { pageMatchesVaultUris, scrubSecrets, type VaultUri } from '../../mcp/fn-vault';
+import { scrubSecrets, type VaultUri } from '../../mcp/fn-vault';
 import { fingerprint, normalizeAccount, type NsAccount } from './account';
 import type { ExpectedUsers } from './expected-users';
 import type { NsStoreClient, StoreAnswer } from './store-client';
@@ -21,6 +21,32 @@ export const SESSION_COOKIE = 'JSESSIONID';
 export const LOCK_POLL_MS = 3_000;
 /** Below a function step's 120 s limit, so a login function's store step never times out first. */
 export const MAX_LOCK_WAIT_MS = 110_000;
+/** A checked vault username is reused this long (names only, never a password). */
+export const VAULT_USER_TTL_MS = 10 * 60 * 1000;
+
+function uriHost(uri: string): string | null {
+  try {
+    return new URL(
+      /^[a-z][a-z0-9+.-]*:\/\//i.test(uri) ? uri : `https://${uri}`,
+    ).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a vault item is a login for this account: one of its URIs is the
+ * account host itself or system.netsuite.com (the generic NetSuite login).
+ * Stricter than Bitwarden's base-domain match, which takes any *.netsuite.com.
+ */
+export function vaultItemIsFor(uris: VaultUri[], host: string): boolean {
+  return uris.some(({ uri, match }) => {
+    if (match === 4 || match === 5) return false;
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(uri) && !/^https?:\/\//i.test(uri)) return false;
+    const h = uriHost(uri);
+    return h === host || h === 'system.netsuite.com';
+  });
+}
 
 export interface NsCookie {
   name: string;
@@ -46,8 +72,12 @@ export interface NsDeps {
   readCookies(profile: string, host: string): Promise<NsCookie[]>;
   writeCookies(profile: string, host: string, cookies: NsCookie[]): Promise<number>;
   tabIdentity(profile: string, host: string): Promise<TabIdentity | null>;
-  /** Whether the profile's session for the host is logged in (card.nl does not land on a login page). */
-  sessionAlive(profile: string, host: string): Promise<boolean>;
+  /**
+   * Whether the profile's session for the host is logged in: dead only when
+   * card.nl lands on a login page of the host; unknown when that could not be
+   * told (network, 429, 5xx, an older extension).
+   */
+  sessionState(profile: string, host: string): Promise<'alive' | 'dead' | 'unknown'>;
   vaultUris(item: string): Promise<VaultUri[]>;
   /** The username of a vault item (never its password). */
   vaultUsername(item: string): Promise<string>;
@@ -131,6 +161,9 @@ function forStore(cookies: NsCookie[]): NsCookie[] {
 }
 
 export class NsSessionTools {
+  /** Checked vault usernames by item and host, with when they were read. */
+  private readonly vaultUsers = new Map<string, { user: string | null; at: number }>();
+
   constructor(private readonly deps: NsDeps) {}
 
   owns(name: string): boolean {
@@ -204,27 +237,37 @@ export class NsSessionTools {
     );
   }
 
-  /** The username of a vault item, only when the item is for this account's site. */
+  /**
+   * The username of a vault item, only when the item is a login for this
+   * account (vaultItemIsFor). Kept for VAULT_USER_TTL_MS per item and host, so
+   * a login function's several store steps read the vault once.
+   */
   private async vaultUser(item: unknown, account: NsAccount): Promise<string | null> {
     if (typeof item !== 'string' || !item) return null;
+    const key = `${item}|${account.host}`;
+    const cached = this.vaultUsers.get(key);
+    if (cached && this.deps.now() - cached.at < VAULT_USER_TTL_MS) return cached.user;
     let uris: VaultUri[];
     try {
       uris = await this.deps.vaultUris(item);
     } catch (err: any) {
       throw new ToolRefusal('VaultError', String(err?.message || err));
     }
-    if (!pageMatchesVaultUris(`https://${account.host}/`, uris)) {
+    if (!vaultItemIsFor(uris, account.host)) {
       throw new ToolRefusal(
         'VaultItemMismatch',
-        `vault item ${item} is not a login for ${account.host}; nothing was read from it`,
+        `vault item ${item} is not a login for ${account.host} or system.netsuite.com; nothing was read from it`,
       );
     }
+    let user: string | null;
     try {
       const name = await this.deps.vaultUsername(item);
-      return name ? name.trim().toLowerCase() : null;
+      user = name ? name.trim().toLowerCase() : null;
     } catch (err: any) {
       throw new ToolRefusal('VaultError', String(err?.message || err));
     }
+    this.vaultUsers.set(key, { user, at: this.deps.now() });
+    return user;
   }
 
   /** args.user, else the checked vault item's username, else the profile's remembered user. */
@@ -344,9 +387,18 @@ export class NsSessionTools {
     for (const c of local) if (typeof c?.value === 'string') secrets.push(c.value);
     const localSession = sessionCookie(local, account.host);
     if (localSession && fingerprint(localSession.value) === fp) {
-      if (await this.deps.sessionAlive(profile, account.host)) {
+      const probed = await this.deps.sessionState(profile, account.host);
+      if (probed === 'alive') {
         if (entryUser) this.deps.users.set(profile, account.account, entryUser);
         return { state: 'already_live', ...meta };
+      }
+      if (probed === 'unknown') {
+        // Not known to be dead: never reported, and nothing to import (same session).
+        return {
+          state: 'already_live_unverified',
+          ...meta,
+          note: 'this profile already has the store session; whether it is logged in could not be checked (reload the page to see).',
+        };
       }
       // The profile has the store's session and it lands on the login page: it is dead.
       await this.deps.store.request('POST', '/dead', {
@@ -425,19 +477,34 @@ export class NsSessionTools {
         note: `no ${SESSION_COOKIE} for ${account.host} in this profile`,
       };
     }
-    if (!(await this.deps.sessionAlive(profile, account.host))) {
+    const probed = await this.deps.sessionState(profile, account.host);
+    if (probed === 'dead') {
       return {
         state: 'no_session',
         account: account.account,
         note: `the session of ${account.host} in this profile is logged out; nothing was sent`,
       };
     }
-    // The same user ensure and lock use: the checked vault item's, else the tab's.
+    if (probed === 'unknown') {
+      return {
+        state: 'probe_unknown',
+        account: account.account,
+        note: 'whether the session is logged in could not be checked; nothing was sent: try again.',
+      };
+    }
+    // The tab's user first; with a vault item too, both must be the same user.
     const identity = await this.deps.tabIdentity(profile, account.host).catch(() => null);
+    const tabUser = identity?.user ? identity.user.trim().toLowerCase() : null;
     const fromVault = await this.vaultUser(args.vault_item, account);
+    if (tabUser && fromVault && tabUser !== fromVault) {
+      throw new ToolRefusal(
+        'UserMismatch',
+        "the account's open tab is logged in as another user than the vault item's; nothing was sent",
+      );
+    }
     let who: Who;
-    if (fromVault) who = { user: fromVault, source: 'vault' };
-    else if (identity?.user) who = { user: identity.user.toLowerCase(), source: 'tab' };
+    if (tabUser) who = { user: tabUser, source: 'tab' };
+    else if (fromVault) who = { user: fromVault, source: 'vault' };
     else if (typeof args.user === 'string' && args.user.trim()) {
       who = { user: args.user.trim().toLowerCase(), source: 'args' };
     } else {

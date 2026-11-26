@@ -4,7 +4,13 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { accountFromHost, fingerprint, normalizeAccount } from './account';
 import { ExpectedUsers } from './expected-users';
-import { NsSessionTools, untilMs, type NsCookie, type NsDeps } from './session-tools';
+import {
+  NsSessionTools,
+  untilMs,
+  vaultItemIsFor,
+  type NsCookie,
+  type NsDeps,
+} from './session-tools';
 import { NsStoreClient, parseTokenFile, type StoreIo } from './store-client';
 
 const SECRET = 'JSESS-VALUE-0123456789abcdef';
@@ -179,7 +185,7 @@ interface FakeBrowser {
   cookies: NsCookie[];
   written: NsCookie[][];
   identity: { user: string | null; role: string | null; role_id: string | null } | null;
-  alive: boolean;
+  probe: 'alive' | 'dead' | 'unknown';
 }
 
 const ITEM = '081555dc-d350-485b-99ae-b4ed017046b4';
@@ -200,7 +206,7 @@ function toolsWith(
     store.fetchFn,
     opts.tokenMissing ? { mtime: () => null } : {},
   );
-  const b: FakeBrowser = { cookies: [], written: [], identity: null, alive: true, ...browser };
+  const b: FakeBrowser = { cookies: [], written: [], identity: null, probe: 'alive', ...browser };
   const usersFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ns-users-')), 'u.json');
   let clock = Date.parse('2026-11-26T15:00:00Z');
   const sleeps: number[] = [];
@@ -226,9 +232,9 @@ function toolsWith(
       touched.push('tabIdentity');
       return b.identity;
     },
-    sessionAlive: async () => {
-      touched.push('sessionAlive');
-      return b.alive;
+    sessionState: async () => {
+      touched.push('sessionState');
+      return b.probe;
     },
     vaultUris: async () => {
       touched.push('vaultUris');
@@ -373,7 +379,13 @@ describe('netsuite_session_* tools', () => {
       parse(await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work'))
         .state,
     ).toBe('already_live');
-    browser.alive = false;
+    browser.probe = 'unknown';
+    const unsure = parse(
+      await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work'),
+    );
+    expect(unsure.state).toBe('already_live_unverified');
+    expect(store.calls.some((c) => c.route === '/dead')).toBe(false);
+    browser.probe = 'dead';
     const dead = parse(
       await tools.call('netsuite_session_ensure', { account: '1234567_SB2' }, 'work'),
     );
@@ -513,13 +525,18 @@ describe('netsuite_session_* tools', () => {
       { ...cookie('JSESSIONID', SECRET), hostOnly: true },
       cookie('NS_ROUTING', OTHER, '.' + HOST),
     ];
-    browser.alive = false;
+    browser.probe = 'dead';
     expect(
       parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work'))
         .state,
     ).toBe('no_session');
+    browser.probe = 'unknown';
+    expect(
+      parse(await tools.call('netsuite_session_publish', { account: '1234567_SB2' }, 'work'))
+        .state,
+    ).toBe('probe_unknown');
     expect(store.calls).toEqual([]);
-    browser.alive = true;
+    browser.probe = 'alive';
     browser.identity = { user: 'Tab.User@example.com', role: '3', role_id: 'administrator' };
     const published = await tools.call(
       'netsuite_session_publish',
@@ -542,7 +559,16 @@ describe('netsuite_session_* tools', () => {
     });
     expect(sent.cookies.every((c: any) => !('hostOnly' in c))).toBe(true);
     expect(store.calls[0].headers['X-NS-Store-Client']).toBe('mokutab/9.9.9 laptop/work');
-    // With a vault item the publish is keyed by the vault user, as ensure and lock are.
+    // The tab's user and the vault item's user must agree.
+    const mismatch = await tools.call(
+      'netsuite_session_publish',
+      { account: '1234567_SB2', vault_item: ITEM },
+      'work',
+    );
+    expect(parse(mismatch).error.code).toBe('UserMismatch');
+    expect(JSON.stringify(mismatch).toLowerCase()).not.toContain('support_bgc');
+    // No tab open: the publish is keyed by the vault user, as ensure and lock are.
+    browser.identity = null;
     const viaVault = parse(
       await tools.call(
         'netsuite_session_publish',
@@ -652,6 +678,46 @@ describe('netsuite_session_* tools', () => {
     expect(text).toContain('chrome refused');
     expect(text).not.toContain(SECRET);
     expect(logs.join('\n')).not.toContain(SECRET);
+  });
+});
+
+describe('vault checks', () => {
+  test('an item counts only with a URI on the account host or system.netsuite.com', () => {
+    const u = (uri: string, match: number | null = null) => [{ uri, match }];
+    expect(vaultItemIsFor(u('https://system.netsuite.com'), HOST)).toBe(true);
+    expect(vaultItemIsFor(u(`https://${HOST}/app/login`), HOST)).toBe(true);
+    expect(vaultItemIsFor(u('https://7654321.app.netsuite.com'), HOST)).toBe(false);
+    expect(vaultItemIsFor(u('netsuite.com'), HOST)).toBe(false);
+    expect(vaultItemIsFor(u('https://system.netsuite.com', 4), HOST)).toBe(false);
+    expect(vaultItemIsFor(u('androidapp://system.netsuite.com'), HOST)).toBe(false);
+  });
+
+  test('the checked vault user is read once per item and host for 10 minutes', async () => {
+    const { tools, touched } = toolsWith({
+      'POST /lock': () => ({ status: 200, body: { ok: true, until: 1 } }),
+      'POST /unlock': () => ({ status: 204 }),
+    });
+    await tools.call(
+      'netsuite_session_lock',
+      { account: '1234567_SB2', vault_item: ITEM },
+      'work',
+    );
+    await tools.call(
+      'netsuite_session_unlock',
+      { account: '1234567_SB2', vault_item: ITEM },
+      'work',
+    );
+    expect(touched.filter((x) => x === 'vaultUsername')).toHaveLength(1);
+    expect(touched.filter((x) => x === 'vaultUris')).toHaveLength(1);
+
+    const other = toolsWith({}, {}, { vaultUris: ['https://7654321.app.netsuite.com'] });
+    const refused = await other.tools.call(
+      'netsuite_session_lock',
+      { account: '1234567_SB2', vault_item: ITEM },
+      'work',
+    );
+    expect(parse(refused).error.code).toBe('VaultItemMismatch');
+    expect(other.touched).not.toContain('vaultUsername');
   });
 });
 
