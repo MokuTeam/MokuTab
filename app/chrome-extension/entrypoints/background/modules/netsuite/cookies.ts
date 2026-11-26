@@ -11,10 +11,20 @@
 
 export const ACCOUNT_HOST = /^[0-9a-z]+(?:-[0-9a-z]+)?\.app\.netsuite\.com$/;
 
-/** Hosts whose cookies this extension just wrote (an import), with when. */
+/** Hosts whose cookies this extension just touched (an import, the session probe), with when. */
 const ownWrites = new Map<string, number>();
-/** How long the cookie changes of an import are not taken for a new session. */
+/** How long the cookie changes of an import or a probe are not taken for a new session. */
 export const OWN_WRITE_QUIET_MS = 10_000;
+
+/** Test seam: forget every quiet window. */
+export function forgetOwnCookieActivity(): void {
+  ownWrites.clear();
+}
+
+/** Open the quiet window for a host: cookie changes in it are this extension's own doing. */
+export function markOwnCookieActivity(host: string, now: number = Date.now()): void {
+  ownWrites.set(host, now);
+}
 
 /** Whether this extension wrote the host's cookies in the last OWN_WRITE_QUIET_MS. */
 export function ownWriteRecent(host: string, now: number = Date.now()): boolean {
@@ -86,7 +96,7 @@ export async function writeNsCookies(payload: any): Promise<{ written: number }>
     if (!validCookie(c, host))
       throw new Error(`refused a cookie that is not a plain cookie of ${host}`);
   }
-  ownWrites.set(host, Date.now());
+  markOwnCookieActivity(host);
   let written = 0;
   for (const c of cookies) {
     const path = typeof c.path === 'string' && c.path.startsWith('/') ? c.path : '/';
@@ -125,6 +135,9 @@ export type NsSessionState = 'alive' | 'dead' | 'unknown';
 export async function probeNsSession(payload: any): Promise<{ state: NsSessionState }> {
   const host = accountHost(payload);
   let response: Response;
+  // The probe's own request may make NetSuite set a cookie (a login page
+  // issues a fresh JSESSIONID): that is not a new session to publish.
+  markOwnCookieActivity(host);
   try {
     response = await fetch(`https://${host}/app/center/card.nl`, {
       credentials: 'include',
@@ -133,6 +146,8 @@ export async function probeNsSession(payload: any): Promise<{ state: NsSessionSt
     });
   } catch {
     return { state: 'unknown' };
+  } finally {
+    markOwnCookieActivity(host);
   }
   // Only the URL matters: never read (or keep) the page.
   try {

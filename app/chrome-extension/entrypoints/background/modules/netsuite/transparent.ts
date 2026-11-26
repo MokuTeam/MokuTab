@@ -8,7 +8,8 @@
  * - a tab or a background request landing on the account's login page ->
  *   ns_login_landing; a tab is then sent where it was going
  * - the account answering normally -> ns_activity (the bridge throttles)
- * - a role or account switch, or a logout, starting -> ns_session_ending
+ * - a logout starting -> ns_session_ending (a role or account switch reports
+ *   nothing: the next publish replaces the store's entry)
  */
 
 import { NativeMessageType } from '@mokuhub/mokutab-shared';
@@ -18,6 +19,8 @@ import { moduleExplicitlyOn } from '../../extension-module';
 import { ACCOUNT_HOST, ownWriteRecent } from './cookies';
 
 export const CHANGE_DEBOUNCE_MS = 3_000;
+/** ns_session_changed at most this often per host (a later change waits, it is not dropped). */
+export const CHANGE_MIN_INTERVAL_MS = 30_000;
 /** A login step this recent makes a new session a fresh login (login_at). */
 export const LOGIN_STEP_WINDOW_MS = 60_000;
 /** A tab landing on the login page again this soon, after an answer of none, is not reported. */
@@ -32,7 +35,6 @@ const LOGIN_PATH = /\/app\/login\/|\/pages\/customerlogin|loginchallenge|\/next\
 const LANDING_PATH =
   /^\/app\/login\/secure\/(loginrouter|enterpriselogin)\.nl$|^\/pages\/customerlogin/i;
 const LOGIN_STEP_PATH = /authenticaterole\.nl$|loginchallenge/i;
-const SWITCH_PATH = /(changeaccount|changerole|chooserole)\.nl$/i;
 const LOGOUT_PATH = /nllogoutnoback\.jsp$|\/logout\.nl$|customerlogout/i;
 
 export interface NsWatchEnv {
@@ -40,6 +42,8 @@ export interface NsWatchEnv {
   enabled(): Promise<boolean>;
   ask(type: string, payload: Record<string, unknown>, timeoutMs?: number): Promise<any>;
   navigate(tabId: number, url: string): Promise<void>;
+  /** The tab's current URL (null when it is gone). */
+  tabUrl(tabId: number): Promise<string | null>;
   now(): number;
   setTimer(fn: () => void, ms: number): unknown;
   clearTimer(handle: unknown): void;
@@ -64,7 +68,8 @@ function accountHostOf(url: URL | null): string | null {
 export class NsWatcher {
   private readonly pendingChange = new Map<string, unknown>();
   private readonly loginSteps = new Map<string, number>();
-  /** Per host: when the last tab landing was answered with none, or is in flight. */
+  private readonly lastChangeSent = new Map<string, number>();
+  /** Per host and tab: when the last landing was answered, whether it navigated, or in flight. */
   private readonly landings = new Map<
     string,
     { at: number; inFlight: boolean; navigated: boolean }
@@ -94,16 +99,28 @@ export class NsWatcher {
       .replace(/^\./, '')
       .toLowerCase();
     if (!ACCOUNT_HOST.test(host) || ownWriteRecent(host, this.env.now())) return;
+    this.scheduleChange(host, CHANGE_DEBOUNCE_MS);
+  }
+
+  private scheduleChange(host: string, delay: number) {
     const previous = this.pendingChange.get(host);
     if (previous !== undefined) this.env.clearTimer(previous);
     this.pendingChange.set(
       host,
       this.env.setTimer(() => {
         this.pendingChange.delete(host);
+        const now = this.env.now();
+        const sent = this.lastChangeSent.get(host);
+        if (sent !== undefined && now - sent < CHANGE_MIN_INTERVAL_MS) {
+          // Too soon after the last report: report the latest state later.
+          this.scheduleChange(host, CHANGE_MIN_INTERVAL_MS - (now - sent));
+          return;
+        }
+        this.lastChangeSent.set(host, now);
         const step = this.loginSteps.get(host);
-        const afterLogin = step !== undefined && this.env.now() - step < LOGIN_STEP_WINDOW_MS;
+        const afterLogin = step !== undefined && now - step < LOGIN_STEP_WINDOW_MS;
         void this.send(NativeMessageType.NS_SESSION_CHANGED, { host, after_login: afterLogin });
-      }, CHANGE_DEBOUNCE_MS),
+      }, delay),
     );
   }
 
@@ -118,12 +135,13 @@ export class NsWatcher {
     }
     if (!LANDING_PATH.test(url.pathname)) return;
     const now = this.env.now();
-    const last = this.landings.get(host);
+    const key = `${host}|${details.tabId}`;
+    const last = this.landings.get(key);
     if (last?.inFlight) return;
     // Right after an answer of none the bridge would say none again; after a
     // navigation it must hear the landing (a bounce: the import did not hold).
     if (last && !last.navigated && now - last.at < LANDING_REPEAT_MS) return;
-    this.landings.set(host, { at: now, inFlight: true, navigated: false });
+    this.landings.set(key, { at: now, inFlight: true, navigated: false });
     const target = url.searchParams.get('redirect');
     const answer = await this.send(
       NativeMessageType.NS_LOGIN_LANDING,
@@ -131,8 +149,13 @@ export class NsWatcher {
       LANDING_TIMEOUT_MS,
     );
     const go = answer?.action === 'navigate' ? parse(answer.url) : null;
-    const navigated = !!go && go.hostname.toLowerCase() === host && go.protocol === 'https:';
-    this.landings.set(host, { at: this.env.now(), inFlight: false, navigated });
+    let navigated = !!go && go.hostname.toLowerCase() === host && go.protocol === 'https:';
+    if (navigated) {
+      // Only a tab still on this host's login page is moved: the user may have gone elsewhere.
+      const current = parse((await this.env.tabUrl(details.tabId).catch(() => null)) ?? undefined);
+      navigated = !!current && accountHostOf(current) === host && LOGIN_PATH.test(current.pathname);
+    }
+    this.landings.set(key, { at: this.env.now(), inFlight: false, navigated });
     if (navigated) {
       await this.env.navigate(details.tabId, go!.toString()).catch(() => undefined);
     }
@@ -143,13 +166,9 @@ export class NsWatcher {
     const url = parse(details.url);
     const host = accountHostOf(url);
     if (!host || !url) return;
-    const reason = SWITCH_PATH.test(url.pathname)
-      ? 'switch'
-      : LOGOUT_PATH.test(url.pathname)
-        ? 'logout'
-        : null;
-    if (!reason) return;
-    await this.send(NativeMessageType.NS_SESSION_ENDING, { host, reason });
+    // Only a logout ends the session for every machine; a switch reports nothing.
+    if (!LOGOUT_PATH.test(url.pathname)) return;
+    await this.send(NativeMessageType.NS_SESSION_ENDING, { host, reason: 'logout' });
   }
 
   async onBeforeRedirect(details: {
@@ -158,11 +177,12 @@ export class NsWatcher {
     type: string;
     initiator?: string;
   }) {
-    if (details.type === 'main_frame' || details.type === 'sub_frame') return;
+    // A tab's own navigation is a landing in onCommitted; images and scripts say nothing.
+    if (details.type !== 'xmlhttprequest' && details.type !== 'sub_frame') return;
     if (details.initiator && details.initiator.startsWith(this.env.ownOrigin)) return;
     const to = parse(details.redirectUrl);
     const host = accountHostOf(to);
-    if (!host || !to || !LOGIN_PATH.test(to.pathname)) return;
+    if (!host || !to || !LANDING_PATH.test(to.pathname)) return;
     const now = this.env.now();
     const last = this.fetchLandings.get(host);
     if (last !== undefined && now - last < FETCH_LANDING_MS) return;
@@ -216,6 +236,10 @@ export function startNsTransparent(): void {
     ask: (type, payload, timeoutMs) => askBridge(type, payload, timeoutMs),
     navigate: async (tabId, url) => {
       await chrome.tabs.update(tabId, { url });
+    },
+    tabUrl: async (tabId) => {
+      const tab = await chrome.tabs.get(tabId);
+      return tab?.url ?? tab?.pendingUrl ?? null;
     },
     now: () => Date.now(),
     setTimer: (fn, ms) => setTimeout(fn, ms),

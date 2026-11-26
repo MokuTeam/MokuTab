@@ -4,15 +4,20 @@
  * ever go out; never a cookie value.
  */
 
-import { describe, expect, test, vi } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { NativeMessageType } from '@mokuhub/mokutab-shared';
-import { writeNsCookies } from '@/entrypoints/background/modules/netsuite/cookies';
+import {
+  forgetOwnCookieActivity,
+  probeNsSession,
+  writeNsCookies,
+} from '@/entrypoints/background/modules/netsuite/cookies';
 import { applyBridgeModulesState } from '@/entrypoints/background/extension-module';
 import {
   nsTransparentEnabled,
   startNsTransparent,
   ACTIVITY_EVERY_MS,
   CHANGE_DEBOUNCE_MS,
+  CHANGE_MIN_INTERVAL_MS,
   FETCH_LANDING_MS,
   LANDING_REPEAT_MS,
   NsWatcher,
@@ -30,7 +35,7 @@ interface Sent {
 }
 
 function harness(over: Partial<NsWatchEnv> & { answer?: (s: Sent) => any; on?: boolean } = {}) {
-  let now = 1_000_000;
+  let now = Date.now();
   const timers: Array<{ fn: () => void; at: number; id: number }> = [];
   let nextId = 1;
   const sent: Sent[] = [];
@@ -46,6 +51,7 @@ function harness(over: Partial<NsWatchEnv> & { answer?: (s: Sent) => any; on?: b
     navigate: async (tabId, url) => {
       navigated.push({ tabId, url });
     },
+    tabUrl: async () => `https://${HOST}/app/login/secure/enterpriselogin.nl?c=1234567_SB2`,
     now: () => now,
     setTimer: (fn, ms) => {
       const id = nextId++;
@@ -77,6 +83,8 @@ function harness(over: Partial<NsWatchEnv> & { answer?: (s: Sent) => any; on?: b
     setOn: (v: boolean) => (on = v),
   };
 }
+
+beforeEach(() => forgetOwnCookieActivity());
 
 const changed = (over: any = {}) => ({
   removed: false,
@@ -110,6 +118,7 @@ describe('publish on a new JSESSIONID', () => {
         timeoutMs: undefined,
       },
     ]);
+    await h.advance(CHANGE_MIN_INTERVAL_MS);
     await h.watcher.onCommitted({
       url: `https://${HOST}/app/login/secure/authenticaterole.nl`,
       frameId: 0,
@@ -135,6 +144,35 @@ describe('publish on a new JSESSIONID', () => {
     expect(h.sent).toEqual([]);
     h.setOn(false);
     h.watcher.onCookieChanged(changed());
+    await h.advance(CHANGE_DEBOUNCE_MS);
+    expect(h.sent).toEqual([]);
+  });
+});
+
+describe('publish loop guards', () => {
+  test('ns_session_changed at most every 30 s per host; the later change is sent, not dropped', async () => {
+    const h = harness();
+    h.watcher.onCookieChanged(changed());
+    await h.advance(CHANGE_DEBOUNCE_MS);
+    expect(h.sent).toHaveLength(1);
+    await h.advance(2_000);
+    h.watcher.onCookieChanged(changed());
+    await h.advance(CHANGE_DEBOUNCE_MS);
+    expect(h.sent).toHaveLength(1);
+    await h.advance(CHANGE_MIN_INTERVAL_MS);
+    expect(h.sent).toHaveLength(2);
+  });
+
+  test('cookie changes caused by our own session probe are not taken for a new session', async () => {
+    (globalThis as any).fetch = vi.fn(async () => ({
+      url: `https://${HOST}/app/login/secure/enterpriselogin.nl`,
+      ok: true,
+      body: { cancel: async () => undefined },
+    }));
+    const h = harness();
+    expect(await probeNsSession({ host: HOST })).toEqual({ state: 'dead' });
+    // The login page set a fresh JSESSIONID while the probe ran, several times.
+    for (let i = 0; i < 3; i++) h.watcher.onCookieChanged(changed());
     await h.advance(CHANGE_DEBOUNCE_MS);
     expect(h.sent).toEqual([]);
   });
@@ -190,18 +228,26 @@ describe('import on a login landing', () => {
     expect(h.sent).toEqual([]);
   });
 
-  test('a background request redirected to the login page imports once a minute, never for our own probe', async () => {
+  test('a background request redirected to a real login page imports once a minute, never for our own probe', async () => {
     const h = harness();
-    const redirect = (initiator?: string) => ({
+    const redirect = (over: any = {}) => ({
       url: `https://${HOST}/app/center/card.nl`,
       redirectUrl: `https://${HOST}/app/login/secure/enterpriselogin.nl?c=1`,
       type: 'xmlhttprequest',
-      initiator,
+      ...over,
     });
-    await h.watcher.onBeforeRedirect(redirect(OWN));
+    await h.watcher.onBeforeRedirect(redirect({ initiator: OWN }));
+    await h.watcher.onBeforeRedirect(redirect({ type: 'script' }));
+    await h.watcher.onBeforeRedirect(redirect({ type: 'image' }));
+    await h.watcher.onBeforeRedirect(redirect({ type: 'main_frame' }));
+    await h.watcher.onBeforeRedirect(
+      redirect({ redirectUrl: `https://${HOST}/app/login/secure/chooserole.nl` }),
+    );
     expect(h.sent).toEqual([]);
-    await h.watcher.onBeforeRedirect(redirect('chrome-extension://another-extension'));
-    await h.watcher.onBeforeRedirect(redirect());
+    await h.watcher.onBeforeRedirect(
+      redirect({ initiator: 'chrome-extension://another-extension' }),
+    );
+    await h.watcher.onBeforeRedirect(redirect({ type: 'sub_frame' }));
     expect(h.sent).toEqual([
       {
         type: NativeMessageType.NS_LOGIN_LANDING,
@@ -212,8 +258,28 @@ describe('import on a login landing', () => {
     await h.advance(FETCH_LANDING_MS);
     await h.watcher.onBeforeRedirect(redirect());
     expect(h.sent).toHaveLength(2);
-    await h.watcher.onBeforeRedirect({ ...redirect(), type: 'main_frame' });
-    expect(h.sent).toHaveLength(2);
+  });
+
+  test('two tabs landing at once are both reported and both go on', async () => {
+    const h = harness({
+      answer: () => ({ action: 'navigate', url: `https://${HOST}/app/center/card.nl` }),
+    });
+    await Promise.all([
+      h.watcher.onCommitted(landing()),
+      h.watcher.onCommitted({ ...landing(), tabId: 8 }),
+    ]);
+    expect(h.sent.map((s) => s.payload.tab_id)).toEqual([7, 8]);
+    expect(h.navigated.map((n) => n.tabId).sort()).toEqual([7, 8]);
+  });
+
+  test('a tab the user moved away from the login page is not pulled back', async () => {
+    const h = harness({
+      answer: () => ({ action: 'navigate', url: `https://${HOST}/app/center/card.nl` }),
+      tabUrl: async () => 'https://mail.example.com/inbox',
+    });
+    await h.watcher.onCommitted(landing());
+    expect(h.sent).toHaveLength(1);
+    expect(h.navigated).toEqual([]);
   });
 });
 
@@ -243,19 +309,17 @@ describe('activity and death signals', () => {
     expect(h.sent).toHaveLength(2);
   });
 
-  test('a role or account switch and a logout report the session ending with their reason', async () => {
+  test('only a logout reports the session ending; role and account switches send nothing', async () => {
     const h = harness();
     const nav = (path: string) => ({ url: `https://${HOST}${path}`, frameId: 0 });
     await h.watcher.onBeforeNavigate(nav('/app/login/secure/changerole.nl?id=3'));
     await h.watcher.onBeforeNavigate(nav('/app/login/secure/changeaccount.nl'));
     await h.watcher.onBeforeNavigate(nav('/app/login/secure/chooserole.nl'));
-    await h.watcher.onBeforeNavigate(nav('/pages/nllogoutnoback.jsp'));
     await h.watcher.onBeforeNavigate(nav('/app/center/card.nl'));
-    expect(h.sent.map((s) => [s.type, s.payload.reason])).toEqual([
-      [NativeMessageType.NS_SESSION_ENDING, 'switch'],
-      [NativeMessageType.NS_SESSION_ENDING, 'switch'],
-      [NativeMessageType.NS_SESSION_ENDING, 'switch'],
-      [NativeMessageType.NS_SESSION_ENDING, 'logout'],
+    expect(h.sent).toEqual([]);
+    await h.watcher.onBeforeNavigate(nav('/pages/nllogoutnoback.jsp'));
+    expect(h.sent.map((s) => [s.type, s.payload])).toEqual([
+      [NativeMessageType.NS_SESSION_ENDING, { host: HOST, reason: 'logout' }],
     ]);
     noValues(h.sent);
   });
