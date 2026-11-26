@@ -276,4 +276,20 @@ describe('bridge tool steps', () => {
     expect(errors.join('\n')).toMatch(/optional: true or false/);
     expect(errors.join('\n')).toMatch(/"nope\.state" is not an earlier step/);
   });
+
+  test('optional is allowed on tool, navigate and wait_for steps only', () => {
+    expect(
+      validateDefinition(
+        base([
+          { id: 'go', type: 'navigate', url: 'https://acme.example.com/x', optional: true },
+          { id: 'w', type: 'wait_for', until: 'true', optional: true },
+        ]),
+      ),
+    ).toEqual([]);
+    expect(
+      validateDefinition(base([{ id: 'j', type: 'js', code: 'return 1;', optional: true }])).join(
+        '\n',
+      ),
+    ).toMatch(/unknown key/);
+  });
 });

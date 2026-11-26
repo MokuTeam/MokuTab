@@ -828,4 +828,27 @@ describe('bridge tools in tool steps', () => {
     expect(out.status).toBe('ok');
     expect(out.result).toEqual({ state: 'logged_in', source: 'form' });
   });
+
+  test('an optional navigate that fails is an error value and the run goes on', async () => {
+    const nav: FnDefinition = {
+      name: 'acme.nav.optional',
+      description: 'x',
+      kind: 'read',
+      params: { type: 'object', properties: {} },
+      target: { url: 'https://acme.example.com/home' },
+      steps: [
+        { id: 'go', type: 'navigate', url: 'https://acme.example.com/logout', optional: true },
+        {
+          id: 'done',
+          type: 'finish',
+          when: { step: 'go.state', equals: 'error' },
+          value: 'fell through',
+        },
+      ],
+    };
+    await save(nav);
+    const out = body(await call(FN_RUN_TOOL, { name: nav.name, params: {} }));
+    expect(out.status).toBe('ok');
+    expect(out.result).toBe('fell through');
+  });
 });

@@ -102,7 +102,10 @@ export interface FnStep {
   /** tool: an allowlisted browser or bridge tool and its arguments (string values are templates). */
   tool?: string;
   args?: Record<string, unknown>;
-  /** tool: a failure becomes the step value {state: 'error', error} instead of failing the run. */
+  /**
+   * tool, navigate, wait_for: a failure becomes the step value
+   * {state: 'error', error} instead of failing the run.
+   */
   optional?: boolean;
   /** pause: params the caller supplies when it resumes. */
   needs?: string[];
@@ -610,8 +613,8 @@ const SCHEMA_KEYS = [
 const CONDITION_KEYS = ['url', 'exists', 'missing', 'js', 'step', 'equals', 'in', 'name'] as const;
 const STEP_COMMON_KEYS = ['id', 'type', 'when', 'commit', 'timeout_ms'];
 const STEP_KEYS: Record<FnStepType, readonly string[]> = {
-  navigate: [...STEP_COMMON_KEYS, 'url'],
-  wait_for: [...STEP_COMMON_KEYS, 'until', 'any'],
+  navigate: [...STEP_COMMON_KEYS, 'url', 'optional'],
+  wait_for: [...STEP_COMMON_KEYS, 'until', 'any', 'optional'],
   js: [...STEP_COMMON_KEYS, 'code'],
   verify: [...STEP_COMMON_KEYS, 'code'],
   tool: [...STEP_COMMON_KEYS, 'tool', 'args', 'optional'],
@@ -825,6 +828,9 @@ export function validateDefinition(def: unknown): string[] {
         commits += 1;
       }
     }
+    if (step.optional !== undefined && typeof step.optional !== 'boolean') {
+      errors.push(`${at}.optional: true or false`);
+    }
     switch (step.type) {
       case 'navigate':
         if (typeof step.url !== 'string' || !/^(https?:\/\/|\{)/i.test(step.url)) {
@@ -874,9 +880,6 @@ export function validateDefinition(def: unknown): string[] {
           errors.push(
             `${at}.tool: one of ${[...FN_TOOL_ALLOWLIST, ...FN_BRIDGE_TOOL_ALLOWLIST].join(', ')}`,
           );
-        }
-        if (step.optional !== undefined && typeof step.optional !== 'boolean') {
-          errors.push(`${at}.optional: true or false`);
         }
         if (
           step.args !== undefined &&

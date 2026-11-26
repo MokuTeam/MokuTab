@@ -364,10 +364,30 @@ export class FnRunner {
     return id ? (state.prev[id] ?? null) : null;
   }
 
+  /** Run a step whose failure is only its value: {state: 'error', error}. */
+  private async optionally(
+    state: RunState,
+    step: FnStep,
+    run: () => Promise<StepsOutcome | null>,
+  ): Promise<StepsOutcome | null> {
+    try {
+      return await run();
+    } catch (err: any) {
+      if (!(err instanceof StepError)) throw err;
+      state.prev[step.id] = { state: 'error', error: err.message };
+      return null;
+    }
+  }
+
   private async execute(state: RunState, step: FnStep): Promise<StepsOutcome | null> {
     const timeout = Math.min(step.timeout_ms ?? 0, MAX_STEP_TIMEOUT_MS);
     switch (step.type) {
       case 'navigate': {
+        if (step.optional) {
+          return this.optionally(state, step, () =>
+            this.execute(state, { ...step, optional: false }),
+          );
+        }
         const url = renderTemplate(step.url as string, this.scope(state), true);
         const refusal = unloadableUrl(url);
         if (refusal) throw new StepError(refusal);
@@ -383,6 +403,11 @@ export class FnRunner {
         return null;
       }
       case 'wait_for': {
+        if (step.optional) {
+          return this.optionally(state, step, () =>
+            this.execute(state, { ...step, optional: false }),
+          );
+        }
         state.prev[step.id] = await this.waitFor(state, step, timeout || DEFAULT_WAIT_MS);
         return null;
       }
