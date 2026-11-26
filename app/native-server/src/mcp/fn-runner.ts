@@ -532,10 +532,23 @@ export class FnRunner {
     if (!this.driver.callBridgeTool)
       throw new StepError(`${name}: this bridge cannot run bridge tools from a function`);
     let result: CallToolResult;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
     try {
-      result = await this.driver.callBridgeTool(name, args, timeoutMs);
+      // The step's timeout and the run's cancel apply here too: the tool runs
+      // on in the bridge, but the run stops waiting for it.
+      const stopped = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs);
+        onAbort = () => reject(new Error('the call was cancelled'));
+        if (this.signal?.aborted) onAbort();
+        else this.signal?.addEventListener('abort', onAbort, { once: true });
+      });
+      result = await Promise.race([this.driver.callBridgeTool(name, args, timeoutMs), stopped]);
     } catch (err: any) {
       throw new StepError(`${name}: ${err?.message || String(err)}`);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (onAbort) this.signal?.removeEventListener('abort', onAbort);
     }
     const value = parseMaybeJson(firstText(result));
     if (result.isError) {

@@ -815,4 +815,17 @@ describe('bridge tools in tool steps', () => {
     expect(failed.status).toBe('failed');
     expect(JSON.stringify(failed)).toMatch(/cannot run bridge tools/);
   });
+
+  test('a bridge tool that never answers stops at the step timeout', async () => {
+    deps.callBridgeTool = () => new Promise<CallToolResult>(() => {});
+    const slow: FnDefinition = {
+      ...storeFn,
+      name: 'acme.login.slow',
+      steps: storeFn.steps.map((s) => (s.id === 'store' ? { ...s, timeout_ms: 50 } : s)),
+    };
+    await save(slow);
+    const out = body(await call(FN_RUN_TOOL, { name: slow.name, params: { account: '1234567' } }));
+    expect(out.status).toBe('ok');
+    expect(out.result).toEqual({ state: 'logged_in', source: 'form' });
+  });
 });

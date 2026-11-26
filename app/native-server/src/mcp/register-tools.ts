@@ -75,6 +75,7 @@ import { handleFnToolCall, isFnTool, profileDriver, type FnDeps } from './browse
 import { FnRegistry } from './fn-registry';
 import { FnRunsLog } from './fn-runs-log';
 import { bitwardenVault } from './fn-vault';
+import { FN_BRIDGE_TOOL_ALLOWLIST } from './fn-definition';
 
 // One registry and run log per bridge process, shared by every MCP session.
 let fnDepsInstance: FnDeps | null = null;
@@ -99,30 +100,39 @@ function fnDeps(): FnDeps {
 }
 
 /**
- * A module's bridge-side tool, called from a browser function step: the
- * owning module must be installed and on, and must answer it in the bridge.
+ * A module's bridge-side tool, called from a browser function step: only a
+ * tool on the function allowlist, owned by an installed module that is on and
+ * answers it in the bridge. Exported for tests (modules, switch and the
+ * extension request are injectable).
  */
-async function callModuleToolForFunction(
+export async function callModuleToolForFunction(
   name: string,
   args: Record<string, unknown>,
   profile: string,
   timeoutMs: number,
+  deps: {
+    modules?: readonly BridgeModule[];
+    switch?: ModuleSwitchView;
+    request?: typeof sendRequestToExtension;
+  } = {},
 ): Promise<CallToolResult> {
-  const owner = INSTALLED_MODULES.find((module) => module.owns(name));
-  if (!owner?.handle) {
-    return {
-      content: [{ type: 'text', text: `Error: ${name} is not a bridge tool` }],
-      isError: true,
-    };
+  const refuse = (text: string): CallToolResult => ({
+    content: [{ type: 'text', text }],
+    isError: true,
+  });
+  if (!FN_BRIDGE_TOOL_ALLOWLIST.includes(name)) {
+    return refuse(`Error: ${name} may not be called from a browser function`);
   }
-  if (!moduleSwitch.isEnabled(owner.id)) {
-    return { content: [{ type: 'text', text: moduleOffMessage(owner, name) }], isError: true };
-  }
+  const owner = (deps.modules ?? INSTALLED_MODULES).find((module) => module.owns(name));
+  if (!owner?.handle) return refuse(`Error: ${name} is not a bridge tool`);
+  if (!(deps.switch ?? moduleSwitch).isEnabled(owner.id))
+    return refuse(moduleOffMessage(owner, name));
+  const request = deps.request ?? sendRequestToExtension;
   const handled = owner.handle(name, args, {
     profile,
     session: null,
     callExtension: async (toolName, toolArgs) => {
-      const response = await sendRequestToExtension(
+      const response = await request(
         { name: toolName, args: toolArgs },
         NativeMessageType.CALL_TOOL,
         timeoutMs,
@@ -130,18 +140,10 @@ async function callModuleToolForFunction(
       );
       return response.status === 'success'
         ? response.data
-        : {
-            content: [{ type: 'text', text: `Error calling tool: ${response.error}` }],
-            isError: true,
-          };
+        : refuse(`Error calling tool: ${response.error}`);
     },
   });
-  if (!handled) {
-    return {
-      content: [{ type: 'text', text: `Error: ${name} is not answered in the bridge` }],
-      isError: true,
-    };
-  }
+  if (!handled) return refuse(`Error: ${name} is not answered in the bridge`);
   return handled;
 }
 
