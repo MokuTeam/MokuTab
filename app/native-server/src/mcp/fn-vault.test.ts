@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, test } from '@jest/globals';
-import { VaultError, bitwardenVault, pageMatchesVaultUris, scrubSecrets } from './fn-vault';
+import * as path from 'path';
+import {
+  VaultError,
+  bitwardenVault,
+  bwAppDataDir,
+  parseSessionFile,
+  pageMatchesVaultUris,
+  scrubSecrets,
+  type VaultHost,
+} from './fn-vault';
 
 const ITEM = 'e3e8fa54-5d0a-492b-9c60-b40101865fbf';
 
@@ -148,5 +157,131 @@ describe('bitwardenVault', () => {
     });
     await expect(vault.get(ITEM, 'password')).rejects.toThrow(VaultError);
     await expect(vault.get(ITEM, 'password')).rejects.toThrow(/locked/);
+  });
+});
+
+describe('session file', () => {
+  test('parseSessionFile reads env-file lines and a bare key', () => {
+    expect(parseSessionFile('# bw\nexport BW_SESSION="abc=="\n')).toBe('abc==');
+    expect(parseSessionFile("BW_SESSION='k1'\r\nOTHER=1\r\n")).toBe('k1');
+    expect(parseSessionFile('BW_SESSION=plain\n')).toBe('plain');
+    expect(parseSessionFile('barekey==\n')).toBe('barekey==');
+    expect(parseSessionFile('OTHER=1\n')).toBeNull();
+    expect(parseSessionFile('BW_SESSION=\n')).toBeNull();
+    expect(parseSessionFile('')).toBeNull();
+  });
+
+  test('the file is re-read on every call and wins over the process environment', async () => {
+    let fileText = 'export BW_SESSION="first"\n';
+    const used: string[] = [];
+    const vault = bitwardenVault(
+      async (_file, _args, env) => {
+        used.push(String(env.BW_SESSION));
+        return { stdout: 'v\n', stderr: '' };
+      },
+      {
+        platform: 'linux',
+        env: { MOKUTAB_BW_SESSION_FILE: '/run/bw/session.env', BW_SESSION: 'inherited' },
+        readFile: (f) => {
+          expect(f).toBe('/run/bw/session.env');
+          return fileText;
+        },
+        exists: () => false,
+      },
+    );
+    await vault.get(ITEM, 'password');
+    fileText = 'BW_SESSION=second\n';
+    await vault.get(ITEM, 'password');
+    expect(used).toEqual(['first', 'second']);
+  });
+
+  test('a stale file key falls back to BW_SESSION; a missing file is not an error', async () => {
+    const used: string[] = [];
+    const vault = bitwardenVault(
+      async (_file, _args, env) => {
+        used.push(String(env.BW_SESSION));
+        if (env.BW_SESSION !== 'good') {
+          const err: any = new Error('exit 1');
+          err.stderr = 'Vault is locked.';
+          throw err;
+        }
+        return { stdout: 'v\n', stderr: '' };
+      },
+      {
+        platform: 'linux',
+        env: { MOKUTAB_BW_SESSION_FILE: '/x', BW_SESSION: 'good' },
+        readFile: () => 'BW_SESSION=stale',
+        exists: () => false,
+      },
+    );
+    expect(await vault.get(ITEM, 'password')).toBe('v');
+    expect(used).toEqual(['stale', 'good']);
+
+    const noFile = bitwardenVault(async () => ({ stdout: 'v\n', stderr: '' }), {
+      platform: 'linux',
+      env: { MOKUTAB_BW_SESSION_FILE: '/x' },
+      readFile: () => {
+        throw new Error('ENOENT');
+      },
+      exists: () => false,
+    });
+    await expect(noFile.get(ITEM, 'password')).rejects.toThrow(/\/x \(MOKUTAB_BW_SESSION_FILE\)/);
+  });
+});
+
+describe('bwAppDataDir', () => {
+  const home = '/home/agent';
+  const usual = path.join(home, '.config', 'Bitwarden CLI');
+  const host = (
+    env: NodeJS.ProcessEnv,
+    present: string[],
+    platform: NodeJS.Platform = 'linux',
+  ): VaultHost => ({
+    env,
+    platform,
+    home,
+    readFile: () => '',
+    exists: (f) => present.includes(f),
+  });
+
+  test('a per-profile XDG_CONFIG_HOME without bw data points bw back at ~/.config', () => {
+    const env = { XDG_CONFIG_HOME: '/home/agent/browser/bsd/config' };
+    expect(bwAppDataDir(host(env, [path.join(usual, 'data.json')]))).toBe(usual);
+  });
+
+  test('leaves bw alone when its XDG dir has data, nothing has data, or it is not Linux', () => {
+    const xdg = '/home/agent/browser/bsd/config';
+    const env = { XDG_CONFIG_HOME: xdg };
+    expect(
+      bwAppDataDir(
+        host(env, [path.join(xdg, 'Bitwarden CLI', 'data.json'), path.join(usual, 'data.json')]),
+      ),
+    ).toBeUndefined();
+    expect(bwAppDataDir(host(env, []))).toBeUndefined();
+    expect(bwAppDataDir(host(env, [path.join(usual, 'data.json')], 'win32'))).toBeUndefined();
+    expect(bwAppDataDir(host({}, [path.join(usual, 'data.json')]))).toBeUndefined();
+    expect(
+      bwAppDataDir(
+        host({ ...env, BITWARDENCLI_APPDATA_DIR: '/set' }, [path.join(usual, 'data.json')]),
+      ),
+    ).toBeUndefined();
+  });
+
+  test('MOKUTAB_BW_APPDATA wins and reaches bw', async () => {
+    expect(bwAppDataDir(host({ MOKUTAB_BW_APPDATA: '/data/bw' }, [], 'win32'))).toBe('/data/bw');
+    let seen: string | undefined;
+    const vault = bitwardenVault(
+      async (_f, _a, env) => {
+        seen = env.BITWARDENCLI_APPDATA_DIR;
+        return { stdout: 'v\n', stderr: '' };
+      },
+      {
+        platform: 'linux',
+        env: { MOKUTAB_BW_APPDATA: '/data/bw', BW_SESSION: 'k' },
+        exists: () => false,
+      },
+    );
+    await vault.get(ITEM, 'password');
+    expect(seen).toBe('/data/bw');
   });
 });

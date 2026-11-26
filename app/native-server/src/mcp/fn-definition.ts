@@ -320,7 +320,7 @@ function filtered(value: unknown, filter: string | undefined): string {
     case 'json':
       return JSON.stringify(value);
     case 'ns_host': {
-      // NetSuite account id -> host label: 3550721_SB1 -> 3550721-sb1
+      // NetSuite account id -> host label: 7654321_SB1 -> 7654321-sb1
       const label = asText(value).toLowerCase().replace(/_/g, '-');
       if (!/^[a-z0-9-]+$/.test(label))
         throw new Error(`{|ns_host} got "${asText(value)}", not an account id`);

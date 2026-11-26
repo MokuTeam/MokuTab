@@ -16,7 +16,7 @@ import nativeMessagingHostInstance from '../native-messaging-host';
 const PIXEL = 'AAECAwQFBgcICQoLDA0ODw==';
 
 function stubResponse(data: unknown) {
-  jest.spyOn(profileRegistry, 'getConnectedProfiles').mockReturnValue(['centium']);
+  jest.spyOn(profileRegistry, 'getConnectedProfiles').mockReturnValue(['work']);
   return jest
     .spyOn(profileRegistry, 'sendRequest')
     .mockResolvedValue({ status: 'success', data } as any);
@@ -25,7 +25,7 @@ function stubResponse(data: unknown) {
 /** Pin a profile so every call takes the WebSocket path, as the router tests do. */
 async function pinnedRouter() {
   const router = createToolRouter();
-  await router.handleToolCall('chrome_switch_profile', { profile: 'centium' });
+  await router.handleToolCall('chrome_switch_profile', { profile: 'work' });
   return router;
 }
 

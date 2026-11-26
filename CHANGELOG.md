@@ -4,6 +4,18 @@ All notable changes to MokuTab, called WorkatoMCP before 2.0. Versions refer to 
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. Dates are the commit dates of the corresponding release.
 
+## Unreleased
+
+### Added
+
+- **`MOKUTAB_BW_SESSION_FILE`.** The vault reads the Bitwarden session key from this file on every call (a bare key, or a `BW_SESSION=` line as a shell env file has it), after the Windows user environment and before `BW_SESSION`. A re-unlock that rewrites the file reaches a running bridge without a restart.
+- **`MOKUTAB_BW_APPDATA`** sets bw's data dir. Without it, on Linux, when the host sets `XDG_CONFIG_HOME` per Chrome profile and that dir has no bw data while `~/.config/Bitwarden CLI` has, the vault points bw there instead of failing with "You are not logged in".
+- **`MOKUTAB_DEFAULT_PROFILE`** pins the bridge's default profile over `default-profile.json` and `chrome_switch_profile` (a switch still moves the active profile until the pinned one reconnects).
+
+### Fixed
+
+- **A default profile that no longer exists.** `default-profile.json` now records when each profile last connected. A remembered default that has not connected for 7 days (a renamed or deleted profile) gives way to the profile that connects, which is saved as the new default. Before, the first profile to reconnect after every restart became the default without being saved.
+
 ## bridge 2.1.0 · shared 2.1.0 (2026-11-20)
 
 Changes for clients that run tools from a script (Claude Code's code mode), where a failed script costs a full round trip: one result shape, coded errors, leases that hold across sessions.

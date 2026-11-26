@@ -7,6 +7,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { readEnv } from '../env';
+
+/** Pins the default profile; beats default-profile.json and chrome_switch_profile. */
+export const DEFAULT_PROFILE_ENV = 'MOKUTAB_DEFAULT_PROFILE';
+/**
+ * A remembered default that has not connected for this long is taken for gone
+ * (a renamed or deleted profile), and the profile that connects instead
+ * becomes the default.
+ */
+export const STALE_DEFAULT_MS = 7 * 24 * 60 * 60 * 1000;
 
 interface PendingRequest {
   resolve: (value: any) => void;
@@ -32,6 +42,13 @@ export class ProfileRegistry {
    */
   private preferredProfile: string | null = null;
   private preferenceFile: string | null = null;
+  /** Set by MOKUTAB_DEFAULT_PROFILE: the default never moves. */
+  private pinnedProfile: string | null = null;
+  /** The default without the pin (what the file keeps, so dropping the pin restores it). */
+  private storedProfile: string | null = null;
+  /** When each profile last connected (epoch ms), persisted with the default. */
+  private lastSeen: Record<string, number> = {};
+  private now: () => number = Date.now;
   private pendingRequests: Map<string, PendingRequest> = new Map();
   private defaultTimeoutMs = 120000;
   /**
@@ -92,31 +109,80 @@ export class ProfileRegistry {
    * Remember the default profile in `file` across bridge restarts. Only the
    * running host calls this; tests keep the registry in memory.
    */
-  public enablePreferencePersistence(file: string): void {
+  public enablePreferencePersistence(
+    file: string,
+    options: { env?: NodeJS.ProcessEnv; now?: () => number } = {},
+  ): void {
     this.preferenceFile = file;
+    if (options.now) this.now = options.now;
     try {
-      const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { profile?: unknown };
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as {
+        profile?: unknown;
+        set_at?: unknown;
+        seen?: unknown;
+      };
+      if (parsed.seen && typeof parsed.seen === 'object') {
+        for (const [name, at] of Object.entries(parsed.seen as Record<string, unknown>)) {
+          const ms = typeof at === 'string' ? Date.parse(at) : NaN;
+          if (Number.isFinite(ms)) this.lastSeen[name] = ms;
+        }
+      }
       if (typeof parsed.profile === 'string' && parsed.profile.trim() !== '') {
+        this.storedProfile = parsed.profile;
         this.preferredProfile = parsed.profile;
-        if (this.connections.has(parsed.profile)) this.activeProfile = parsed.profile;
+        // A file from before last-seen was recorded: the default counts as seen
+        // when it was set, or, with no date at all, now (the 7 days start here).
+        const setAt = typeof parsed.set_at === 'string' ? Date.parse(parsed.set_at) : NaN;
+        if (this.lastSeen[parsed.profile] === undefined) {
+          this.lastSeen[parsed.profile] = Number.isFinite(setAt) ? setAt : this.now();
+        }
       }
     } catch {
       // No file yet, or unreadable: the first profile to connect becomes the default.
     }
+    const pin = readEnv(DEFAULT_PROFILE_ENV, options.env)?.trim();
+    if (pin) {
+      this.pinnedProfile = pin;
+      this.preferredProfile = pin;
+    }
+    if (this.preferredProfile && this.connections.has(this.preferredProfile)) {
+      this.activeProfile = this.preferredProfile;
+    }
+  }
+
+  /** A remembered default that has not connected for STALE_DEFAULT_MS. Never a pinned one. */
+  private preferredIsStale(): boolean {
+    if (!this.preferredProfile || this.pinnedProfile) return false;
+    if (this.connections.has(this.preferredProfile)) return false;
+    const seen = this.lastSeen[this.preferredProfile];
+    return seen === undefined || this.now() - seen > STALE_DEFAULT_MS;
   }
 
   private setPreferredProfile(profileName: string): void {
-    this.preferredProfile = profileName;
+    this.storedProfile = profileName;
+    // A pinned default stays; the switch still moves the active profile.
+    if (!this.pinnedProfile) this.preferredProfile = profileName;
+    this.persistPreference();
+  }
+
+  private persistPreference(): void {
     if (!this.preferenceFile) return;
     try {
+      const seen: Record<string, string> = {};
+      for (const [name, at] of Object.entries(this.lastSeen))
+        seen[name] = new Date(at).toISOString();
       fs.mkdirSync(path.dirname(this.preferenceFile), { recursive: true });
       fs.writeFileSync(
         this.preferenceFile,
-        JSON.stringify({ profile: profileName, set_at: new Date().toISOString() }),
+        JSON.stringify({
+          profile: this.storedProfile,
+          set_at: new Date(this.now()).toISOString(),
+          seen,
+        }),
       );
     } catch (error: any) {
       logProfileRegistry(
-        `[ProfileRegistry] Could not persist default profile "${profileName}": ${error?.message}`,
+        `[ProfileRegistry] Could not persist default profile "${this.storedProfile}": ${error?.message}`,
       );
     }
   }
@@ -141,6 +207,16 @@ export class ProfileRegistry {
     this.connectionSerials.set(profileName, this.nextSerial);
     this.generation += 1;
     logProfileRegistry(`[ProfileRegistry] Profile "${profileName}" connected.`);
+
+    if (this.preferredIsStale()) {
+      logProfileRegistry(
+        `[ProfileRegistry] Default profile "${this.preferredProfile}" has not connected for over 7 days; "${profileName}" is the default now.`,
+      );
+      this.storedProfile = profileName;
+      this.preferredProfile = profileName;
+    }
+    this.lastSeen[profileName] = this.now();
+    this.persistPreference();
 
     if (this.preferredProfile === profileName && this.activeProfile !== profileName) {
       this.activeProfile = profileName;

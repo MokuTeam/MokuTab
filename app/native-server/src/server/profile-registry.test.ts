@@ -46,9 +46,9 @@ describe('ProfileRegistry active-profile election', () => {
     const first = new FakeSocket();
     const second = new FakeSocket();
 
-    registry.register('centium', first);
+    registry.register('work', first);
     registry.register('bluBanyan', second);
-    expect(registry.getActiveProfile()).toBe('centium');
+    expect(registry.getActiveProfile()).toBe('work');
 
     first.emit('close');
 
@@ -60,18 +60,18 @@ describe('ProfileRegistry active-profile election', () => {
     const registry = quietRegistry();
     const first = new FakeSocket();
     const second = new FakeSocket();
-    registry.register('centium', first);
+    registry.register('work', first);
     registry.register('bluBanyan', second);
 
     second.emit('close');
 
-    expect(registry.getActiveProfile()).toBe('centium');
+    expect(registry.getActiveProfile()).toBe('work');
   });
 
   test('the last profile leaving clears the active profile', () => {
     const registry = quietRegistry();
     const socket = new FakeSocket();
-    registry.register('centium', socket);
+    registry.register('work', socket);
 
     socket.emit('close');
 
@@ -84,7 +84,7 @@ describe('ProfileRegistry active-profile election', () => {
     const first = new FakeSocket();
     const start = registry.getGeneration();
 
-    registry.register('centium', first);
+    registry.register('work', first);
     const afterConnect = registry.getGeneration();
     expect(afterConnect).not.toBe(start);
 
@@ -93,7 +93,7 @@ describe('ProfileRegistry active-profile election', () => {
     expect(afterClose).not.toBe(afterConnect);
 
     // A reconnect of the same name is a new browser session, so it must show up.
-    registry.register('centium', new FakeSocket());
+    registry.register('work', new FakeSocket());
     expect(registry.getGeneration()).not.toBe(afterClose);
   });
 });
@@ -141,23 +141,23 @@ describe('ProfileRegistry reconnects', () => {
   test('a closing socket fails its in-flight requests at once', async () => {
     const registry = quietRegistry();
     const socket = new FakeSocket();
-    registry.register('centium', socket);
+    registry.register('work', socket);
 
-    const pending = registry.sendRequest('centium', {}, 'call_tool', 60000);
+    const pending = registry.sendRequest('work', {}, 'call_tool', 60000);
     socket.emit('close');
 
-    await expect(pending).rejects.toThrow('Profile "centium" disconnected before replying');
+    await expect(pending).rejects.toThrow('Profile "work" disconnected before replying');
   });
 
   test("a replaced socket's close fails only its own requests", async () => {
     const registry = quietRegistry();
     const oldSocket = new FakeSocket();
-    registry.register('centium', oldSocket);
-    const onOld = registry.sendRequest('centium', {}, 'call_tool', 60000);
+    registry.register('work', oldSocket);
+    const onOld = registry.sendRequest('work', {}, 'call_tool', 60000);
 
     const newSocket = new FakeSocket();
-    registry.register('centium', newSocket);
-    const onNew = registry.sendRequest('centium', {}, 'call_tool', 60000);
+    registry.register('work', newSocket);
+    const onNew = registry.sendRequest('work', {}, 'call_tool', 60000);
     oldSocket.emit('close');
 
     await expect(onOld).rejects.toThrow('disconnected before replying');
@@ -187,10 +187,10 @@ describe('ProfileRegistry reconnects', () => {
     const registry = quietRegistry();
     const personal = new FakeSocket();
     registry.register('personal', personal);
-    registry.register('centium', new FakeSocket());
+    registry.register('work', new FakeSocket());
 
     personal.emit('close');
-    expect(registry.getActiveProfile()).toBe('centium');
+    expect(registry.getActiveProfile()).toBe('work');
 
     registry.register('personal', new FakeSocket());
     expect(registry.getActiveProfile()).toBe('personal');
@@ -217,8 +217,8 @@ describe('ProfileRegistry default-profile persistence', () => {
     const registry = new ProfileRegistry();
     registry.enablePreferencePersistence(file);
 
-    registry.register('centium', new FakeSocket());
-    expect(registry.getActiveProfile()).toBe('centium');
+    registry.register('work', new FakeSocket());
+    expect(registry.getActiveProfile()).toBe('work');
     registry.register('personal', new FakeSocket());
     expect(registry.getActiveProfile()).toBe('personal');
   });
@@ -230,7 +230,7 @@ describe('ProfileRegistry default-profile persistence', () => {
     registry.enablePreferencePersistence(file);
 
     registry.register('bluBanyan', new FakeSocket());
-    registry.register('centium', new FakeSocket());
+    registry.register('work', new FakeSocket());
 
     expect(JSON.parse(fs.readFileSync(file, 'utf8')).profile).toBe('bluBanyan');
   });
@@ -247,5 +247,96 @@ describe('ProfileRegistry default-profile persistence', () => {
 
     expect(JSON.parse(fs.readFileSync(file, 'utf8')).profile).toBe('personal');
     expect(registry.getPreferredProfile()).toBe('personal');
+  });
+
+  const DAY = 24 * 60 * 60 * 1000;
+  const NOW = Date.parse('2026-11-26T12:00:00Z');
+
+  test('a default that has not connected for over 7 days gives way to the profile that connects', () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    const file = tempFile();
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        profile: 'default',
+        seen: { default: new Date(NOW - 8 * DAY).toISOString() },
+      }),
+    );
+    const registry = new ProfileRegistry();
+    registry.enablePreferencePersistence(file, { env: {}, now: () => NOW });
+
+    registry.register('bsd', new FakeSocket());
+    registry.register('bb', new FakeSocket());
+
+    expect(registry.getPreferredProfile()).toBe('bsd');
+    expect(registry.getActiveProfile()).toBe('bsd');
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+    expect(saved.profile).toBe('bsd');
+    expect(Object.keys(saved.seen).sort()).toEqual(['bb', 'bsd', 'default']);
+  });
+
+  test('a default seen recently keeps its place while it is away', () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    const file = tempFile();
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        profile: 'personal',
+        set_at: new Date(NOW - 30 * DAY).toISOString(),
+        seen: { personal: new Date(NOW - DAY).toISOString() },
+      }),
+    );
+    const registry = new ProfileRegistry();
+    registry.enablePreferencePersistence(file, { env: {}, now: () => NOW });
+
+    registry.register('work', new FakeSocket());
+
+    expect(registry.getPreferredProfile()).toBe('personal');
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).profile).toBe('personal');
+  });
+
+  test('an old file: set_at stands in for last seen, no date at all starts the clock now', () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    const recent = tempFile();
+    fs.writeFileSync(
+      recent,
+      JSON.stringify({ profile: 'personal', set_at: new Date(NOW - DAY).toISOString() }),
+    );
+    const r1 = new ProfileRegistry();
+    r1.enablePreferencePersistence(recent, { env: {}, now: () => NOW });
+    r1.register('work', new FakeSocket());
+    expect(r1.getPreferredProfile()).toBe('personal');
+
+    fs.writeFileSync(recent, JSON.stringify({ profile: 'default' }));
+    let clock = NOW;
+    const r2 = new ProfileRegistry();
+    r2.enablePreferencePersistence(recent, { env: {}, now: () => clock });
+    r2.register('bsd', new FakeSocket());
+    expect(r2.getPreferredProfile()).toBe('default');
+    clock = NOW + 8 * DAY;
+    r2.register('bb', new FakeSocket());
+    expect(r2.getPreferredProfile()).toBe('bb');
+  });
+
+  test('MOKUTAB_DEFAULT_PROFILE pins the default over the file and a switch', () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    const file = tempFile();
+    fs.writeFileSync(file, JSON.stringify({ profile: 'bb', set_at: new Date(NOW).toISOString() }));
+    const registry = new ProfileRegistry();
+    registry.enablePreferencePersistence(file, {
+      env: { MOKUTAB_DEFAULT_PROFILE: 'bsd' },
+      now: () => NOW,
+    });
+
+    registry.register('bb', new FakeSocket());
+    expect(registry.getActiveProfile()).toBe('bb');
+    registry.register('bsd', new FakeSocket());
+    expect(registry.getActiveProfile()).toBe('bsd');
+
+    expect(registry.switchProfile('bb')).toBe(true);
+    expect(registry.getActiveProfile()).toBe('bb');
+    expect(registry.getPreferredProfile()).toBe('bsd');
+    // The file keeps the unpinned choice, so dropping the pin brings it back.
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).profile).toBe('bb');
   });
 });

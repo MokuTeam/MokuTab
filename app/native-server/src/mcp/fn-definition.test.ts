@@ -195,14 +195,14 @@ describe('checkParams', () => {
 
 describe('templates', () => {
   const scope = {
-    args: { id: 'a b', acct: '3550721_SB1', n: 2 },
+    args: { id: 'a b', acct: '7654321_SB1', n: 2 },
     prev: { open: { url: 'https://x' } },
   };
 
   test('URL-encodes by default in URLs, with filters and literal braces', () => {
     expect(renderTemplate('https://h/?id={id}&n={n}', scope, true)).toBe('https://h/?id=a%20b&n=2');
     expect(renderTemplate('{acct|ns_host}.app.netsuite.com', scope, false)).toBe(
-      '3550721-sb1.app.netsuite.com',
+      '7654321-sb1.app.netsuite.com',
     );
     expect(renderTemplate('{{literal}} {prev.open.url|raw}', scope, true)).toBe(
       '{literal} https://x',
