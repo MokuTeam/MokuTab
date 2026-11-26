@@ -4,6 +4,13 @@ All notable changes to MokuTab, called WorkatoMCP before 2.0. Versions refer to 
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. Dates are the commit dates of the corresponding release.
 
+## bridge 2.2.1 · shared 2.2.1 (2026-11-26)
+
+### Fixed
+
+- **A NetSuite login lock without a run_id.** The session store refuses a lock holder without one. The bridge now creates a run_id when the caller names none and sends the same on relock and unlock.
+- **Failed optional function steps read as ok.** An optional step that failed is traced as `failed_optional` with its error; its value stays `{state: 'error'}`.
+
 ## bridge 2.2.0 · shared 2.2.0 (2026-11-26)
 
 ### Added
