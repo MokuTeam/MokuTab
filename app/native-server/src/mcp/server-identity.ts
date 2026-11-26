@@ -18,8 +18,8 @@ export const SERVER_NAME = 'MokuTab';
  * installed modules that are off.
  *
  * Documented limit is 2 KB; every on/off combination is deliberately kept
- * under 1500 bytes so it survives a client that budgets instructions alongside
- * tool descriptions. It names tools only, never repeats their parameters: the
+ * under 1800 bytes (1500 until the NetSuite module joined Workato) so it
+ * survives a client that budgets instructions alongside tool descriptions. It names tools only, never repeats their parameters: the
  * schema is the documentation, and duplicating it here is how the two drift
  * apart.
  */

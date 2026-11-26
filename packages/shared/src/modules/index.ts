@@ -11,6 +11,7 @@ import { type Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { ToolModule } from '../module';
 import { CORE_TOOL_NAMES, CORE_TOOL_SCHEMAS } from '../tools';
 import { WORKATO_MODULE, WORKATO_TOOL_NAMES } from './workato';
+import { NETSUITE_MODULE, NETSUITE_TOOL_NAMES } from './netsuite';
 
 export {
   WORKATO_MODULE,
@@ -25,8 +26,20 @@ export {
   WORKATO_TAB_SHARED_TOOL_NAMES,
 } from './workato';
 
+export {
+  NETSUITE_MODULE,
+  NETSUITE_MODULE_ID,
+  NETSUITE_MODULE_TITLE,
+  NETSUITE_TOOL_NAMES,
+  NETSUITE_TOOL_SCHEMAS,
+  NETSUITE_INSTRUCTIONS,
+  NETSUITE_READ_ONLY_TOOL_NAMES,
+  NETSUITE_DESTRUCTIVE_TOOL_NAMES,
+  NETSUITE_FN_TOOL_NAMES,
+} from './netsuite';
+
 /** Every installed module, in listing order. */
-export const MODULES: readonly ToolModule[] = [WORKATO_MODULE];
+export const MODULES: readonly ToolModule[] = [WORKATO_MODULE, NETSUITE_MODULE];
 
 /**
  * Every tool name, grouped as before the module split, plus BRIDGE: the four
@@ -43,6 +56,7 @@ export const TOOL_NAMES = {
   WORKATO_LOOKUP: WORKATO_TOOL_NAMES.WORKATO_LOOKUP,
   WORKATO_DATA_TABLE: WORKATO_TOOL_NAMES.WORKATO_DATA_TABLE,
   WORKATO_SESSION: WORKATO_TOOL_NAMES.WORKATO_SESSION,
+  NETSUITE_SESSION: NETSUITE_TOOL_NAMES.NETSUITE_SESSION,
 };
 
 /**

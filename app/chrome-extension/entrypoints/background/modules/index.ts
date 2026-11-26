@@ -8,5 +8,9 @@
 
 import type { ExtensionModule } from '../extension-module';
 import { workatoExtensionModule } from './workato';
+import { netsuiteExtensionModule } from './netsuite';
 
-export const EXTENSION_MODULES: readonly ExtensionModule[] = [workatoExtensionModule];
+export const EXTENSION_MODULES: readonly ExtensionModule[] = [
+  workatoExtensionModule,
+  netsuiteExtensionModule,
+];

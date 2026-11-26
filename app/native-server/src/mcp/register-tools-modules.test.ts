@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, jest, test } from '@jest/globals';
-import { CORE_TOOL_SCHEMAS, TOOL_SCHEMAS, WORKATO_TOOL_ALIASES } from '@mokuhub/mokutab-shared';
+import {
+  CORE_TOOL_SCHEMAS,
+  NETSUITE_TOOL_SCHEMAS,
+  TOOL_SCHEMAS,
+  WORKATO_TOOL_ALIASES,
+} from '@mokuhub/mokutab-shared';
 import { INSTALLED_MODULES } from '../modules';
 import { profileRegistry } from '../server/profile-registry';
 import { createToolRouter } from './register-tools';
@@ -26,7 +31,10 @@ describe('tools/list follows the module switch', () => {
   test('Workato on: core plus every Workato tool, then its aliases', async () => {
     const { tools } = await createToolRouter({ switch: memorySwitch() }).listTools();
     const workato = INSTALLED_MODULES.find((module) => module.id === 'workato')!;
-    expect(tools).toHaveLength(CORE_TOOL_SCHEMAS.length + workato.tools.length + ALIASES.length);
+    const netsuite = INSTALLED_MODULES.find((module) => module.id === 'netsuite')!;
+    expect(tools).toHaveLength(
+      CORE_TOOL_SCHEMAS.length + workato.tools.length + netsuite.tools.length + ALIASES.length,
+    );
     expect(tools).toHaveLength(TOOL_SCHEMAS.length + ALIASES.length);
     expect(new Set(tools.map((tool) => tool.name))).toEqual(
       new Set([...TOOL_SCHEMAS.map((tool) => tool.name), ...ALIAS_NAMES]),
@@ -34,8 +42,10 @@ describe('tools/list follows the module switch', () => {
     expect(tools.slice(-ALIASES.length).map((tool) => tool.name)).toEqual(ALIAS_NAMES);
   });
 
-  test('Workato off: the core tools only, no aliases', async () => {
-    const { tools } = await createToolRouter({ switch: memorySwitch(['workato']) }).listTools();
+  test('Workato and NetSuite off: the core tools only, no aliases', async () => {
+    const { tools } = await createToolRouter({
+      switch: memorySwitch(['workato', 'netsuite']),
+    }).listTools();
     expect(tools).toHaveLength(CORE_TOOL_SCHEMAS.length);
     expect(tools.map((tool) => tool.name).sort()).toEqual(
       CORE_TOOL_SCHEMAS.map((tool) => tool.name).sort(),
@@ -53,9 +63,9 @@ describe('tools/list follows the module switch', () => {
   });
 
   test('a switch flipped mid-session changes the next listing', async () => {
-    const switches = memorySwitch();
+    const switches = memorySwitch(['netsuite']);
     const router = createToolRouter({ switch: switches });
-    const on = TOOL_SCHEMAS.length + ALIASES.length;
+    const on = TOOL_SCHEMAS.length - NETSUITE_TOOL_SCHEMAS.length + ALIASES.length;
     expect((await router.listTools()).tools).toHaveLength(on);
     switches.turn('workato', false);
     expect((await router.listTools()).tools).toHaveLength(CORE_TOOL_SCHEMAS.length);
@@ -179,10 +189,9 @@ describe('a switched-off module refuses its tools', () => {
   });
 
   test('chrome_bridge_info counts the catalogue that is actually served', async () => {
-    const off = await createToolRouter({ switch: memorySwitch(['workato']) }).handleToolCall(
-      'chrome_bridge_info',
-      {},
-    );
+    const off = await createToolRouter({
+      switch: memorySwitch(['workato', 'netsuite']),
+    }).handleToolCall('chrome_bridge_info', {});
     const on = await createToolRouter({ switch: memorySwitch() }).handleToolCall(
       'chrome_bridge_info',
       {},

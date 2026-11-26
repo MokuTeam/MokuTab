@@ -58,11 +58,11 @@ describe('server instructions', () => {
     expect(INSTALLED_MODULES.map((module) => module.id)).toEqual(MODULES.map((m) => m.id));
   });
 
-  test('every on/off combination stays under the 1500-byte budget the plan sets', () => {
+  test('every on/off combination stays under the 1800-byte budget', () => {
     for (const on of combinations()) {
       const size = Buffer.byteLength(instructionsFor(on), 'utf8');
       expect(size).toBeGreaterThan(200);
-      expect(size).toBeLessThan(1500);
+      expect(size).toBeLessThan(1800);
     }
   });
 

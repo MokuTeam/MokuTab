@@ -60,6 +60,9 @@ export default defineConfig({
       'bookmarks',
       'offscreen',
       'storage',
+      // NetSuite module: the session store reads and sets one account host's
+      // cookies (httpOnly included) without a tab or the debugger banner.
+      'cookies',
       // chrome_watch_start readings without the debugger banner (needs the
       // per-extension "Allow User Scripts" toggle; falls back to CDP without it)
       'userScripts',

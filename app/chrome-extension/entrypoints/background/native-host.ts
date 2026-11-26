@@ -14,13 +14,23 @@ import { acquireKeepalive } from './keepalive-manager';
 import { getExtensionBuildInfo, scheduleExtensionReload } from './dev-reload';
 import { agentTabInfo, closeAgentTab, navigateAgentTab, openAgentTab } from './agent-tabs';
 import { runWatchProbe } from './watch-probe';
-import { applyBridgeModulesState, clearModuleStates } from './extension-module';
+import { applyBridgeModulesState, clearModuleStates, moduleEnabled } from './extension-module';
 import { EXTENSION_MODULES } from './modules';
 import { moduleStatesOf, readStoredModulesState } from '@/common/module-state';
 import { BridgeRequests } from './bridge-requests';
 import { createModulePopupHandlers } from './module-popup';
 
 const LOG_PREFIX = '[NativeHost]';
+
+/** The module that answers a typed bridge request, and its handler. */
+function moduleBridgeRequest(type: unknown) {
+  if (typeof type !== 'string') return null;
+  for (const module of EXTENSION_MODULES) {
+    const handler = module.bridgeRequests?.[type];
+    if (handler) return { module, handler };
+  }
+  return null;
+}
 
 /** Requests this extension sent to the bridge (module switch). */
 const bridgeRequests = new BridgeRequests();
@@ -549,6 +559,22 @@ async function connectWebSocket(port: number): Promise<boolean> {
                     ? await navigateAgentTab(message.payload ?? {})
                     : await closeAgentTab(message.payload?.tabId);
             payload = { status: 'success', data };
+          } catch (error) {
+            payload = {
+              status: 'error',
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+          ws.send(JSON.stringify({ responseToRequestId: message.requestId, payload }));
+        } else if (message.requestId && moduleBridgeRequest(message.type)) {
+          // A module's typed request (NetSuite cookies): answered only while it is on.
+          const { module, handler } = moduleBridgeRequest(message.type)!;
+          let payload: Record<string, unknown>;
+          try {
+            if (!(await moduleEnabled(module.id))) {
+              throw new Error(`the ${module.title} module is switched off`);
+            }
+            payload = { status: 'success', data: await handler(message.payload ?? {}) };
           } catch (error) {
             payload = {
               status: 'error',

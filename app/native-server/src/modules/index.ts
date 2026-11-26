@@ -9,5 +9,6 @@
 
 import type { BridgeModule } from '../mcp/module-api';
 import { workatoModule } from './workato';
+import { netsuiteModule } from './netsuite';
 
-export const INSTALLED_MODULES: readonly BridgeModule[] = [workatoModule];
+export const INSTALLED_MODULES: readonly BridgeModule[] = [workatoModule, netsuiteModule];

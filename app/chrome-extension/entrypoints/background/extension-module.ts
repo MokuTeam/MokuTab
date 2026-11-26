@@ -42,6 +42,12 @@ export interface ExtensionModule {
    * takes its tab alone.
    */
   sharesTab?(name: string): boolean;
+  /**
+   * Typed bridge -> extension requests this module answers, by message type
+   * (NetSuite: session cookies). Not tools: what they return never reaches a
+   * tool result. Refused while the module is off.
+   */
+  bridgeRequests?: Readonly<Record<string, (payload: any) => Promise<unknown>>>;
 }
 
 let cache: ModuleStates | null = null;

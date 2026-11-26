@@ -1,0 +1,36 @@
+/**
+ * The NetSuite module, extension side: no tools of its own (the
+ * netsuite_session_* tools run in the bridge), only the typed bridge requests
+ * that read and write one account host's session cookies.
+ */
+
+import {
+  NETSUITE_MODULE_ID,
+  NETSUITE_MODULE_TITLE,
+  NativeMessageType,
+} from '@mokuhub/mokutab-shared';
+import type { ExtensionModule } from '../../extension-module';
+import { nsTabIdentity, readNsCookies, writeNsCookies } from './cookies';
+
+const DESCRIPTION_KEY = 'moduleDescription_netsuite';
+const DESCRIPTION = 'NetSuite sessions shared between machines through the session store.';
+
+function description(): string {
+  try {
+    return chrome.i18n?.getMessage?.(DESCRIPTION_KEY) || DESCRIPTION;
+  } catch {
+    return DESCRIPTION;
+  }
+}
+
+export const netsuiteExtensionModule: ExtensionModule = {
+  id: NETSUITE_MODULE_ID,
+  title: NETSUITE_MODULE_TITLE,
+  description: description(),
+  executors: [],
+  bridgeRequests: {
+    [NativeMessageType.NS_COOKIES_READ]: readNsCookies,
+    [NativeMessageType.NS_COOKIES_WRITE]: writeNsCookies,
+    [NativeMessageType.NS_TAB_IDENTITY]: nsTabIdentity,
+  },
+};
