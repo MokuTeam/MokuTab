@@ -19,6 +19,7 @@ import { answerModuleBridgeRequest, findModuleBridgeRequest } from './module-bri
 import { EXTENSION_MODULES } from './modules';
 import { moduleStatesOf, readStoredModulesState } from '@/common/module-state';
 import { BridgeRequests } from './bridge-requests';
+import { setBridgeSender } from './bridge-channel';
 import { createModulePopupHandlers } from './module-popup';
 
 const LOG_PREFIX = '[NativeHost]';
@@ -759,6 +760,19 @@ export function connectNativeHost(port: number = NATIVE_HOST.DEFAULT_PORT): bool
  * Initialize native host listeners and load initial state
  */
 export const initNativeHostListener = () => {
+  // Modules reach the bridge through this profile's socket (bridge-channel.ts).
+  setBridgeSender((type, payload, timeoutMs) =>
+    bridgeRequests.request(wsClient, type, payload, timeoutMs),
+  );
+  // Listeners a module needs from the start (MV3: registered synchronously).
+  for (const module of EXTENSION_MODULES) {
+    try {
+      module.start?.();
+    } catch (error) {
+      console.error(`${LOG_PREFIX} module ${module.id} failed to start:`, error);
+    }
+  }
+
   // Initialize server status from storage
   loadServerStatus()
     .then((status) => {

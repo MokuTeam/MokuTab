@@ -9,7 +9,18 @@
  * alone.
  */
 
-const ACCOUNT_HOST = /^[0-9a-z]+(?:-[0-9a-z]+)?\.app\.netsuite\.com$/;
+export const ACCOUNT_HOST = /^[0-9a-z]+(?:-[0-9a-z]+)?\.app\.netsuite\.com$/;
+
+/** Hosts whose cookies this extension just wrote (an import), with when. */
+const ownWrites = new Map<string, number>();
+/** How long the cookie changes of an import are not taken for a new session. */
+export const OWN_WRITE_QUIET_MS = 10_000;
+
+/** Whether this extension wrote the host's cookies in the last OWN_WRITE_QUIET_MS. */
+export function ownWriteRecent(host: string, now: number = Date.now()): boolean {
+  const at = ownWrites.get(host);
+  return at !== undefined && now - at < OWN_WRITE_QUIET_MS;
+}
 
 export interface NsCookie {
   name: string;
@@ -75,6 +86,7 @@ export async function writeNsCookies(payload: any): Promise<{ written: number }>
     if (!validCookie(c, host))
       throw new Error(`refused a cookie that is not a plain cookie of ${host}`);
   }
+  ownWrites.set(host, Date.now());
   let written = 0;
   for (const c of cookies) {
     const path = typeof c.path === 'string' && c.path.startsWith('/') ? c.path : '/';
