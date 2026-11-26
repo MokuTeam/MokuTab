@@ -23,16 +23,16 @@
       <span>{{ getMessage('nsSessionsEmpty') }}</span>
     </div>
 
-    <div v-else class="card-group">
+    <div v-else class="card-group ns-list">
       <button
         v-for="entry in entries"
-        :key="entry.account"
+        :key="sessionKey(entry)"
         type="button"
         class="ns-row"
-        :class="{ opening: openingAccount === entry.account }"
-        :disabled="openingAccount !== null"
+        :class="{ opening: openingKey === sessionKey(entry) }"
+        :disabled="openingKey !== null"
         :title="getMessage('nsSessionOpenTooltip', [entry.account])"
-        @click="emit('open', entry.account)"
+        @click="emit('open', entry)"
       >
         <div class="ns-row-top">
           <div class="ns-account-wrap">
@@ -51,7 +51,7 @@
 
           <div class="ns-right">
             <span
-              v-if="openingAccount === entry.account"
+              v-if="openingKey === sessionKey(entry)"
               class="mini-spinner"
               aria-hidden="true"
             ></span>
@@ -72,9 +72,9 @@
           </span>
         </div>
 
-        <p v-if="rowErrors[entry.account]" class="ns-row-error" role="alert">
-          {{ rowErrors[entry.account] }}
-        </p>
+        <span v-if="rowErrors[sessionKey(entry)]" class="ns-row-error" role="alert">
+          {{ rowErrors[sessionKey(entry)] }}
+        </span>
       </button>
     </div>
   </section>
@@ -91,6 +91,7 @@ import { getMessage } from '@/utils/i18n';
 import {
   formatLastActivity,
   formatTimeLeft,
+  sessionKey,
   splitAccountId,
   type NsSessionEntry,
 } from '../ns-sessions';
@@ -99,12 +100,14 @@ defineProps<{
   entries: NsSessionEntry[];
   status: 'loading' | 'ready' | 'unreachable';
   nowMs: number;
-  openingAccount: string | null;
+  /** sessionKey of the row being opened. */
+  openingKey: string | null;
+  /** Error text per sessionKey. */
   rowErrors: Record<string, string>;
 }>();
 
 const emit = defineEmits<{
-  open: [account: string];
+  open: [entry: NsSessionEntry];
 }>();
 </script>
 
@@ -160,6 +163,13 @@ const emit = defineEmits<{
   border-radius: var(--r-pill);
   background: var(--label-3);
   flex: none;
+}
+
+/* Long lists scroll inside the section; Modules and Settings stay in view. */
+.ns-list {
+  max-height: 188px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .ns-row {
@@ -282,7 +292,10 @@ const emit = defineEmits<{
 }
 
 .ns-activity {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--label-3);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -290,6 +303,7 @@ const emit = defineEmits<{
 }
 
 .ns-row-error {
+  display: block;
   margin-top: 2px;
   font-size: 11px;
   color: var(--red);

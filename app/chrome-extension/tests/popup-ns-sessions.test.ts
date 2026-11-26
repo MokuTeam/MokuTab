@@ -13,7 +13,9 @@ import {
   formatTimeLeft,
   isSessionExpired,
   NS_SESSION_MESSAGES,
+  errorMessageKey,
   openNsSession,
+  sessionKey,
   splitAccountId,
   type NsSessionEntry,
 } from '@/entrypoints/popup/ns-sessions';
@@ -147,22 +149,42 @@ describe('fetchNsSessions', () => {
 });
 
 describe('openNsSession', () => {
-  test('sends ns_session_open and returns tabId or error', async () => {
+  test('sends ns_session_open with account and user, returns tabId or a code', async () => {
     const okSend = vi.fn(async () => ({ ok: true, tabId: 42 }));
-    expect(await openNsSession('1234567_SB2', okSend)).toEqual({ ok: true, tabId: 42 });
+    expect(await openNsSession('1234567_SB2', 'a@b.c', okSend)).toEqual({ ok: true, tabId: 42 });
     expect(okSend).toHaveBeenCalledWith({
       type: NS_SESSION_MESSAGES.OPEN,
       account: '1234567_SB2',
+      user: 'a@b.c',
     });
 
     expect(
-      await openNsSession('1234567', async () => ({ ok: false, error: 'Session expired' })),
-    ).toEqual({ ok: false, error: 'Session expired' });
-
+      await openNsSession('1234567', 'a@b.c', async () => ({ ok: false, code: 'other_user' })),
+    ).toEqual({ ok: false, code: 'other_user' });
     expect(
-      await openNsSession('1234567', async () => {
+      await openNsSession('1234567', 'a@b.c', async () => ({ ok: false, code: 'weird' })),
+    ).toEqual({ ok: false, code: 'open_failed' });
+    expect(
+      await openNsSession('1234567', 'a@b.c', async () => {
         throw new Error('closed');
       }),
-    ).toEqual({ ok: false, error: 'closed' });
+    ).toEqual({ ok: false, code: 'open_failed' });
+  });
+});
+
+describe('row keys and error texts', () => {
+  test('two users of one account are two rows', () => {
+    expect(sessionKey({ account: '1234567', user: 'a@b.c' })).not.toBe(
+      sessionKey({ account: '1234567', user: 'd@e.f' }),
+    );
+  });
+
+  test('every code maps to a message key; unknown codes read as a failed open', () => {
+    expect(errorMessageKey('module_off')).toBe('nsErrorModuleOff');
+    expect(errorMessageKey('store_unreachable')).toBe('nsErrorStoreUnreachable');
+    expect(errorMessageKey('other_user')).toBe('nsErrorOtherUser');
+    expect(errorMessageKey('could_not_check')).toBe('nsErrorCouldNotCheck');
+    expect(errorMessageKey('open_failed')).toBe('nsSessionOpenFailed');
+    expect(errorMessageKey('anything')).toBe('nsSessionOpenFailed');
   });
 });

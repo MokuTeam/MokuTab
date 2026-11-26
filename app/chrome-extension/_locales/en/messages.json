@@ -7,14 +7,6 @@
     "message": "Chrome extension that exposes the user's logged-in browser session as MCP tools for AI agents.",
     "description": "Extension description shown in chrome://extensions"
   },
-  "nativeServerConfigLabel": {
-    "message": "Native Server Configuration",
-    "description": "Main section header for native server settings"
-  },
-  "runningStatusLabel": {
-    "message": "Running Status",
-    "description": "Server running status label"
-  },
   "lastUpdatedLabel": {
     "message": "Last Updated:",
     "description": "Last updated timestamp label"
@@ -77,10 +69,6 @@
     "message": "Refresh Status",
     "description": "Refresh status button tooltip"
   },
-  "copyConfigButton": {
-    "message": "Copy Configuration",
-    "description": "Copy configuration button text"
-  },
   "copyShortButton": {
     "message": "Copy",
     "description": "Compact copy button label"
@@ -93,17 +81,9 @@
     "message": "Failed",
     "description": "Compact copy error label"
   },
-  "networkErrorMessage": {
-    "message": "Network connection error, please check network and retry",
-    "description": "Network connection error message"
-  },
   "bookmarksBarLabel": {
     "message": "Bookmarks Bar",
     "description": "Bookmarks bar folder name"
-  },
-  "configCopiedNotification": {
-    "message": "Configuration copied to clipboard",
-    "description": "Configuration copied success message"
   },
   "modulesSectionLabel": {
     "message": "Modules",
@@ -192,5 +172,93 @@
   "footerTagline": {
     "message": "browser tools for ai agents",
     "description": "Short tagline shown in popup footer"
+  },
+  "nsTimeLessThanMinute": {
+    "message": "< 1 min",
+    "description": "NetSuite session time left under a minute"
+  },
+  "nsTimeHoursMinutes": {
+    "message": "$HOURS$ h $MINUTES$ min",
+    "description": "NetSuite session time left in hours and minutes",
+    "placeholders": {
+      "hours": {
+        "content": "$1",
+        "example": "2"
+      },
+      "minutes": {
+        "content": "$2",
+        "example": "10"
+      }
+    }
+  },
+  "nsTimeHours": {
+    "message": "$HOURS$ h",
+    "description": "NetSuite session time left in whole hours",
+    "placeholders": {
+      "hours": {
+        "content": "$1",
+        "example": "2"
+      }
+    }
+  },
+  "nsTimeMinutes": {
+    "message": "$MINUTES$ min",
+    "description": "NetSuite session time left in minutes",
+    "placeholders": {
+      "minutes": {
+        "content": "$1",
+        "example": "14"
+      }
+    }
+  },
+  "nsAgoJustNow": {
+    "message": "just now",
+    "description": "NetSuite session activity less than a minute ago"
+  },
+  "nsAgoMinutes": {
+    "message": "$COUNT$ min ago",
+    "description": "NetSuite session activity minutes ago",
+    "placeholders": {
+      "count": {
+        "content": "$1",
+        "example": "5"
+      }
+    }
+  },
+  "nsAgoHours": {
+    "message": "$COUNT$ h ago",
+    "description": "NetSuite session activity hours ago",
+    "placeholders": {
+      "count": {
+        "content": "$1",
+        "example": "2"
+      }
+    }
+  },
+  "nsAgoDays": {
+    "message": "$COUNT$ d ago",
+    "description": "NetSuite session activity days ago",
+    "placeholders": {
+      "count": {
+        "content": "$1",
+        "example": "1"
+      }
+    }
+  },
+  "nsErrorStoreUnreachable": {
+    "message": "Session store not reachable",
+    "description": "Open failed: the session store did not answer"
+  },
+  "nsErrorModuleOff": {
+    "message": "The NetSuite module is off",
+    "description": "Open failed: the NetSuite module is switched off"
+  },
+  "nsErrorOtherUser": {
+    "message": "This profile is logged in to the account as another user. Log out there first.",
+    "description": "Open refused: another user is logged in"
+  },
+  "nsErrorCouldNotCheck": {
+    "message": "Could not check the open session. Nothing was changed.",
+    "description": "Open refused: the local session could not be checked"
   }
 }

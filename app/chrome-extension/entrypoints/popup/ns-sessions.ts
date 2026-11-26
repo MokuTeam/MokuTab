@@ -5,6 +5,8 @@
  * Version: 1.0.0
  */
 
+import { getMessage } from '@/utils/i18n';
+
 export const NETSUITE_MODULE_ID = 'netsuite';
 
 export const NS_SESSION_MESSAGES = {
@@ -16,7 +18,8 @@ export type NsSessionMessageType = (typeof NS_SESSION_MESSAGES)[keyof typeof NS_
 
 export const NS_SESSIONS_TIMEOUT_MS = 3000;
 export const NS_SESSIONS_REFRESH_MS = 30_000;
-export const NS_SESSION_OPEN_TIMEOUT_MS = 15_000;
+/** The background may probe the profile's session and import a copy (up to 40 s). */
+export const NS_SESSION_OPEN_TIMEOUT_MS = 45_000;
 
 export type NsSessionState = 'live' | 'dying';
 
@@ -42,20 +45,63 @@ export interface NsSessionsListRequest {
 
 export type NsSessionsListResponse =
   | { ok: true; entries: NsSessionEntry[] }
-  | { ok: false; error: string };
+  | { ok: false; code: NsSessionErrorCode };
 
 export interface NsSessionOpenRequest {
   type: typeof NS_SESSION_MESSAGES.OPEN;
   account: string;
+  /** The row's user: an account may have more than one live user. */
+  user?: string;
 }
 
-export type NsSessionOpenResponse = { ok: true; tabId: number } | { ok: false; error: string };
+/** Why an open or list failed; the popup maps each to its own text. */
+export type NsSessionErrorCode =
+  | 'module_off'
+  | 'store_unreachable'
+  | 'other_user'
+  | 'could_not_check'
+  | 'open_failed';
+
+export type NsSessionOpenResponse =
+  | { ok: true; tabId: number }
+  | { ok: false; code: NsSessionErrorCode };
 
 export type NsSessionsFetchResult =
   | { status: 'ready'; entries: NsSessionEntry[] }
   | { status: 'unreachable'; entries: [] };
 
-export type NsSessionOpenResult = { ok: true; tabId: number } | { ok: false; error: string };
+export type NsSessionOpenResult =
+  | { ok: true; tabId: number }
+  | { ok: false; code: NsSessionErrorCode };
+
+const ERROR_CODES: readonly NsSessionErrorCode[] = [
+  'module_off',
+  'store_unreachable',
+  'other_user',
+  'could_not_check',
+  'open_failed',
+];
+
+/** The message key for an error code (unknown codes read as a failed open). */
+export function errorMessageKey(code: unknown): string {
+  switch (code) {
+    case 'module_off':
+      return 'nsErrorModuleOff';
+    case 'store_unreachable':
+      return 'nsErrorStoreUnreachable';
+    case 'other_user':
+      return 'nsErrorOtherUser';
+    case 'could_not_check':
+      return 'nsErrorCouldNotCheck';
+    default:
+      return 'nsSessionOpenFailed';
+  }
+}
+
+/** A row's identity: an account can have several live users. */
+export function sessionKey(entry: Pick<NsSessionEntry, 'account' | 'user'>): string {
+  return `${entry.account}|${entry.user}`;
+}
 
 export type RuntimeSender = (message: unknown) => Promise<unknown>;
 
@@ -102,25 +148,25 @@ export function formatTimeLeft(
   const expiry = effectiveExpiry(entry);
   if (expiry === null) return '';
   const diffMs = expiry - nowMs;
-  if (diffMs <= 0) return '< 1 min';
   const totalMinutes = Math.floor(diffMs / 60_000);
-  if (totalMinutes < 1) return '< 1 min';
+  if (diffMs <= 0 || totalMinutes < 1) return getMessage('nsTimeLessThanMinute');
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
-  if (hours > 0 && minutes > 0) return `${hours} h ${minutes} min`;
-  if (hours > 0) return `${hours} h`;
-  return `${minutes} min`;
+  if (hours > 0 && minutes > 0) {
+    return getMessage('nsTimeHoursMinutes', [String(hours), String(minutes)]);
+  }
+  if (hours > 0) return getMessage('nsTimeHours', [String(hours)]);
+  return getMessage('nsTimeMinutes', [String(minutes)]);
 }
 
 function formatRelativeAge(timestampMs: number, nowMs: number): string {
   const diffMs = Math.max(0, nowMs - timestampMs);
   const minutes = Math.floor(diffMs / 60_000);
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 1) return getMessage('nsAgoJustNow');
+  if (minutes < 60) return getMessage('nsAgoMinutes', [String(minutes)]);
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days} d ago`;
+  if (hours < 24) return getMessage('nsAgoHours', [String(hours)]);
+  return getMessage('nsAgoDays', [String(Math.floor(hours / 24))]);
 }
 
 /** Format last activity time and location, e.g. "5 min ago, server-2/bb". */
@@ -218,35 +264,29 @@ export async function fetchNsSessions(
   }
 }
 
-/** Ask the background to open an already logged-in tab for a NetSuite account. */
+/** Ask the background to open an already logged-in tab for a NetSuite account and user. */
 export async function openNsSession(
   account: string,
+  user: string,
   sendMessage: RuntimeSender,
   timeoutMs = NS_SESSION_OPEN_TIMEOUT_MS,
 ): Promise<NsSessionOpenResult> {
   try {
     const raw = await withTimeout(
-      Promise.resolve(sendMessage({ type: NS_SESSION_MESSAGES.OPEN, account })),
+      Promise.resolve(
+        sendMessage({ type: NS_SESSION_MESSAGES.OPEN, account, ...(user ? { user } : {}) }),
+      ),
       timeoutMs,
     );
-    if (!raw || typeof raw !== 'object') {
-      return { ok: false, error: '' };
-    }
-    const response = raw as Partial<NsSessionOpenResponse>;
+    const response = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
     if (response.ok === true && typeof response.tabId === 'number') {
       return { ok: true, tabId: response.tabId };
     }
-    return {
-      ok: false,
-      error:
-        typeof (response as { error?: unknown }).error === 'string'
-          ? (response as { error: string }).error
-          : '',
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error && error.message !== 'timeout' ? error.message : '',
-    };
+    const code = ERROR_CODES.includes(response.code as NsSessionErrorCode)
+      ? (response.code as NsSessionErrorCode)
+      : 'open_failed';
+    return { ok: false, code };
+  } catch {
+    return { ok: false, code: 'open_failed' };
   }
 }

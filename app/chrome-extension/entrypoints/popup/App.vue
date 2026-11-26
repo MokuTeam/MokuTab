@@ -85,7 +85,7 @@
         :entries="nsSessions"
         :status="nsSessionsStatus"
         :now-ms="nowMs"
-        :opening-account="openingNsAccount"
+        :opening-key="openingNsKey"
         :row-errors="nsRowErrors"
         @open="handleOpenNsSession"
       />
@@ -192,7 +192,9 @@ import {
   fetchNsSessions,
   NETSUITE_MODULE_ID,
   NS_SESSIONS_REFRESH_MS,
+  errorMessageKey,
   openNsSession,
+  sessionKey,
   type NsSessionEntry,
   type RuntimeSender,
 } from './ns-sessions';
@@ -249,7 +251,7 @@ const isNetsuiteEnabled = computed(() =>
 );
 const nsSessions = ref<NsSessionEntry[]>([]);
 const nsSessionsStatus = ref<'loading' | 'ready' | 'unreachable'>('loading');
-const openingNsAccount = ref<string | null>(null);
+const openingNsKey = ref<string | null>(null);
 const nsRowErrors = ref<Record<string, string>>({});
 const nowMs = ref(Date.now());
 let nsRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -286,7 +288,7 @@ watch(
       nsSessions.value = [];
       nsSessionsStatus.value = 'loading';
       nsRowErrors.value = {};
-      openingNsAccount.value = null;
+      openingNsKey.value = null;
       return;
     }
     void loadNsSessions(false);
@@ -297,31 +299,40 @@ watch(
   { immediate: true },
 );
 
-const handleOpenNsSession = async (account: string) => {
-  if (openingNsAccount.value !== null) return;
-  openingNsAccount.value = account;
-  if (nsRowErrors.value[account]) {
+const handleOpenNsSession = async (entry: NsSessionEntry) => {
+  if (openingNsKey.value !== null) return;
+  const key = sessionKey(entry);
+  openingNsKey.value = key;
+  if (nsRowErrors.value[key]) {
     const nextErrors = { ...nsRowErrors.value };
-    delete nextErrors[account];
+    delete nextErrors[key];
     nsRowErrors.value = nextErrors;
   }
   try {
-    const result = await openNsSession(account, sendRuntimeMessage);
+    const result = await openNsSession(entry.account, entry.user, sendRuntimeMessage);
     if (!result.ok) {
-      nsRowErrors.value = {
-        ...nsRowErrors.value,
-        [account]: result.error || getMessage('nsSessionOpenFailed'),
-      };
+      nsRowErrors.value = { ...nsRowErrors.value, [key]: getMessage(errorMessageKey(result.code)) };
     }
   } finally {
-    openingNsAccount.value = null;
+    openingNsKey.value = null;
   }
 };
 
+/**
+ * New module state from the bridge (after a connect, a switch, a push): when
+ * the NetSuite module was on already, its list is reloaded now rather than at
+ * the next 30 s tick (a change of the switch reloads through the watcher).
+ */
+const refreshNsAfterModules = (wasEnabled: boolean) => {
+  if (wasEnabled && isNetsuiteEnabled.value) void loadNsSessions(true);
+};
+
 const applyModulesReply = (reply: any) => {
+  const wasEnabled = isNetsuiteEnabled.value;
   if (Array.isArray(reply?.modules)) modules.value = reply.modules;
   if (reply?.bridge) modulesBridge.value = reply.bridge;
   modulesError.value = reply?.success === false && reply?.error ? String(reply.error) : '';
+  refreshNsAfterModules(wasEnabled);
 };
 
 const loadModules = async () => {
@@ -352,6 +363,7 @@ const toggleModule = async (module: PopupModule) => {
 };
 
 const onModulesChanged = (payload: any) => {
+  const wasEnabled = isNetsuiteEnabled.value;
   const pushed = new Map<string, boolean>();
   for (const entry of Array.isArray(payload?.modules) ? payload.modules : []) {
     if (entry && typeof entry.id === 'string' && typeof entry.enabled === 'boolean') {
@@ -362,6 +374,7 @@ const onModulesChanged = (payload: any) => {
     ...module,
     enabled: pushed.get(module.id) ?? module.enabled,
   }));
+  refreshNsAfterModules(wasEnabled);
 };
 
 const mcpConfigJson = computed(() => {
