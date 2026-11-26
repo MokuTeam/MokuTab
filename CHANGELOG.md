@@ -4,6 +4,17 @@ All notable changes to MokuTab, called WorkatoMCP before 2.0. Versions refer to 
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. Dates are the commit dates of the corresponding release.
 
+## Unreleased
+
+### Added
+
+- **NetSuite sessions in the popup.** While the `netsuite` module is on, the popup lists the session store's live and dying sessions (account, user, time left, last activity) and opens one in a new tab, logged in, on a click. A session the profile already has is replaced only when a probe says it is logged out; another user's live session, or one that cannot be checked, is left alone. Two live users of one account are two rows.
+- **`auto_renew` on publish.** An explicit `netsuite_session_publish` with a checked `vault_item` (which `netsuite.login` sends after a login) tells the store whether the item has a TOTP. Transparent publishes leave it out.
+
+### Changed
+
+- **Popup redesign.** A compact connection header, the NetSuite sessions list, module switches and the port, profile and MCP config folded into Settings.
+
 ## bridge 2.3.0 · shared 2.3.0 (2026-11-26)
 
 ### Added
