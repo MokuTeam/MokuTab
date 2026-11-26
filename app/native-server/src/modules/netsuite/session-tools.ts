@@ -526,6 +526,7 @@ export class NsSessionTools {
         { user: remembered, source: remembered ? 'remembered' : null },
         profile,
         secrets,
+        false,
       );
     } catch (err: any) {
       return {
@@ -563,6 +564,26 @@ export class NsSessionTools {
     } catch {
       return 'unknown';
     }
+  }
+
+  /**
+   * The store's live (or dying) entries for the account, metadata only:
+   * {user, fp, origin}. Empty when the store cannot be asked.
+   */
+  async liveEntries(account: NsAccount, profile: string): Promise<Json[]> {
+    const answer = await this.deps.store.request('GET', '/list', {
+      query: { account: account.account },
+      profile,
+    });
+    const listed = bodyOf(answer)?.entries;
+    const entries: Json[] = Array.isArray(listed) ? listed : [];
+    return entries
+      .filter(
+        (e) =>
+          (e?.state === 'live' || e?.state === 'dying') &&
+          (!e?.account || e.account === account.account),
+      )
+      .map((e) => ({ user: e.user ?? null, fp: e.fp ?? null, origin: e.origin ?? null }));
   }
 
   /** The user this profile remembers for the account, or null. */
@@ -655,6 +676,7 @@ export class NsSessionTools {
     who: Who,
     profile: string,
     secrets: string[],
+    pickAmbiguous = true,
   ): Promise<Json> {
     let user = who.user;
     let source = who.source;
@@ -664,6 +686,9 @@ export class NsSessionTools {
       profile,
     });
     if (answer.kind === 'error' && answer.code === 'ambiguous_user' && !user) {
+      if (!pickAmbiguous) {
+        return { state: 'several_users', account: account.account };
+      }
       const users = Array.isArray(answer.body?.users) ? answer.body.users : [];
       const newest = [...users].sort(
         (a, b) => (untilMs(b?.last_activity) || 0) - (untilMs(a?.last_activity) || 0),

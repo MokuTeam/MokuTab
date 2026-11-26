@@ -16,6 +16,7 @@ import { ExpectedUsers } from './expected-users';
 import { NsSessionTools, type NsCookie, type NsDeps, type TabIdentity } from './session-tools';
 import { NsStoreClient } from './store-client';
 import { NsTransparent } from './transparent';
+import { accountFromHost } from './account';
 import { serverVersion } from '../../mcp/server-identity';
 import { moduleSwitch } from '../../mcp/module-switch';
 
@@ -92,6 +93,42 @@ function transparent(): NsTransparent {
   return transparentInstance;
 }
 
+const SAFE_FP = /^[0-9a-f]{8}$/i;
+const SAFE_CODE = /^[A-Za-z0-9_]{1,32}$/;
+
+/**
+ * One stderr line per transparent event, for acceptance runs: type, account,
+ * profile, outcome or reason and time. Never a value; an fp is the 8-char
+ * fingerprint, and the target path is not logged.
+ */
+export function logged(
+  type: string,
+  handler: (payload: any, profile: string) => Promise<Record<string, any>>,
+): (payload: any, profile: string) => Promise<Record<string, any>> {
+  return async (payload, profile) => {
+    const started = Date.now();
+    const account = accountFromHost(payload?.host)?.account ?? 'not_an_account';
+    try {
+      const result = await handler(payload, profile);
+      const fp = typeof result?.fp === 'string' && SAFE_FP.test(result.fp) ? result.fp : null;
+      const outcome = [result?.action ?? result?.state, result?.reason, fp]
+        .filter((part) => typeof part === 'string' && part)
+        .join(' ');
+      console.error(
+        `[ns-transparent] ${type} ${account} profile=${profile} -> ${outcome || 'done'} ${Date.now() - started}ms`,
+      );
+      return result;
+    } catch (err: any) {
+      const rawCode = err?.code ?? err?.name;
+      const code = typeof rawCode === 'string' && SAFE_CODE.test(rawCode) ? rawCode : 'Error';
+      console.error(
+        `[ns-transparent] ${type} ${account} profile=${profile} -> error ${code} ${Date.now() - started}ms`,
+      );
+      throw err;
+    }
+  };
+}
+
 export const netsuiteModule: BridgeModule = {
   id: NETSUITE_MODULE.id,
   title: NETSUITE_MODULE.title,
@@ -107,14 +144,18 @@ export const netsuiteModule: BridgeModule = {
   },
   // Transparent mode: the extension reports a host, the bridge acts.
   extensionRequests: {
-    [NativeMessageType.NS_SESSION_CHANGED]: (payload, profile) =>
+    [NativeMessageType.NS_SESSION_CHANGED]: logged('changed', (payload, profile) =>
       transparent().onChanged(payload, profile),
-    [NativeMessageType.NS_LOGIN_LANDING]: (payload, profile) =>
+    ),
+    [NativeMessageType.NS_LOGIN_LANDING]: logged('landing', (payload, profile) =>
       transparent().onLanding(payload, profile),
-    [NativeMessageType.NS_ACTIVITY]: (payload, profile) =>
+    ),
+    [NativeMessageType.NS_ACTIVITY]: logged('activity', (payload, profile) =>
       transparent().onActivity(payload, profile),
-    [NativeMessageType.NS_SESSION_ENDING]: (payload, profile) =>
+    ),
+    [NativeMessageType.NS_SESSION_ENDING]: logged('ending', (payload, profile) =>
       transparent().onEnding(payload, profile),
+    ),
     // The popup's NetSuite sessions section: the list, and a click that opens one.
     [NativeMessageType.NS_POPUP_LIST]: () => liveTools().popupList(),
     [NativeMessageType.NS_POPUP_OPEN]: (payload, profile) =>

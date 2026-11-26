@@ -1,9 +1,10 @@
-import { describe, expect, test } from '@jest/globals';
+import { describe, expect, jest, test } from '@jest/globals';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
 import { accountFromHost, fingerprint, normalizeAccount } from './account';
-import { ExpectedUsers } from './expected-users';
+import { ExpectedUsers, mergeExpectedUsers } from './expected-users';
+import { logged } from './index';
 import {
   NsSessionTools,
   untilMs,
@@ -218,6 +219,7 @@ function toolsWith(
     users: new ExpectedUsers(
       () => usersFile,
       () => clock,
+      () => [],
     ),
     readCookies: async () => {
       touched.push('readCookies');
@@ -873,15 +875,12 @@ describe('transparent mode (bridge)', () => {
     }
   });
 
-  test('a profile that never took the account imports nothing on its own', async () => {
+  test('a profile that never took the account takes the only live user on its own, and remembers it', async () => {
     const t = setup({ cookies: [] }, { remembered: null });
     t.remote();
-    expect(await t.tr.onLanding({ host: HOST, kind: 'tab' }, 'work')).toEqual({
-      action: 'none',
-      reason: 'no_expected_user',
-    });
-    expect(t.browser.written).toEqual([]);
-    expect(t.store.calls).toEqual([]);
+    expect((await t.tr.onLanding({ host: HOST, kind: 'tab' }, 'work')).action).toBe('navigate');
+    expect(t.browser.written).toHaveLength(1);
+    expect(t.users.get('work', '1234567_SB2')).toBe(USER);
   });
 
   test('a dead or missing local session: a tab imports and goes to its target, a fetch only imports', async () => {
@@ -1380,5 +1379,284 @@ describe('auto_renew on publish', () => {
       false,
     );
     expect(transparent.touched).not.toContain('vaultHasTotp');
+  });
+});
+
+describe('phase 2 acceptance fixes', () => {
+  test('expected users live in one file per machine; old state-dir files are merged in, newest wins', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-eu-'));
+    const data = path.join(root, 'data', 'ns-expected-users.json');
+    const oldA = path.join(root, 'state-work', 'ns-expected-users.json');
+    const oldB = path.join(root, 'state-personal', 'ns-expected-users.json');
+    fs.mkdirSync(path.dirname(oldA), { recursive: true });
+    fs.mkdirSync(path.dirname(oldB), { recursive: true });
+    fs.writeFileSync(
+      oldA,
+      JSON.stringify({ work: { '1234567': { user: 'old@x.y', at: '2026-11-20T00:00:00Z' } } }),
+    );
+    fs.writeFileSync(
+      oldB,
+      JSON.stringify({
+        work: { '1234567': { user: 'new@x.y', at: '2026-11-25T00:00:00Z' } },
+        personal: { '7654321': { user: 'b@x.y', at: '2026-11-21T00:00:00Z' } },
+      }),
+    );
+    const users = new ExpectedUsers(
+      () => data,
+      () => Date.parse('2026-11-26T00:00:00Z'),
+      () => [oldA, oldB],
+    );
+    expect(users.get('work', '1234567')).toBe('new@x.y');
+    expect(users.get('personal', '7654321')).toBe('b@x.y');
+    expect(fs.existsSync(data)).toBe(true);
+    // Another bridge owner on the same machine reads the same file.
+    const other = new ExpectedUsers(
+      () => data,
+      Date.now,
+      () => [],
+    );
+    expect(other.get('work', '1234567')).toBe('new@x.y');
+    // A newer entry already in the data file is not replaced by an older one.
+    const into: any = { work: { '1234567': { user: 'z@x.y', at: '2026-11-26T00:00:00Z' } } };
+    expect(
+      mergeExpectedUsers(into, {
+        work: { '1234567': { user: 'q@x.y', at: '2026-11-01T00:00:00Z' } },
+      }),
+    ).toBe(false);
+    expect(into.work['1234567'].user).toBe('z@x.y');
+  });
+
+  test('default ExpectedUsers uses MOKUTAB_DATA_DIR and survives bridge state-dir switches', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-eu-env-'));
+    const data = path.join(root, 'shared-data');
+    const state1 = path.join(root, 'state-1');
+    const state2 = path.join(root, 'state-2');
+    fs.mkdirSync(state1, { recursive: true });
+    fs.mkdirSync(state2, { recursive: true });
+    fs.writeFileSync(
+      path.join(state1, 'ns-expected-users.json'),
+      JSON.stringify({ work: { '1234567': { user: 'a@x.y', at: '2026-11-26T00:00:00Z' } } }),
+    );
+    const prevData = process.env.MOKUTAB_DATA_DIR;
+    const prevState = process.env.MOKUTAB_UPDATE_STATE_DIR;
+    try {
+      process.env.MOKUTAB_DATA_DIR = data;
+      process.env.MOKUTAB_UPDATE_STATE_DIR = state1;
+      const first = new ExpectedUsers();
+      expect(first.get('work', '1234567')).toBe('a@x.y');
+      expect(fs.existsSync(path.join(data, 'ns-expected-users.json'))).toBe(true);
+      process.env.MOKUTAB_UPDATE_STATE_DIR = state2;
+      const second = new ExpectedUsers();
+      expect(second.get('work', '1234567')).toBe('a@x.y');
+    } finally {
+      if (prevData === undefined) delete process.env.MOKUTAB_DATA_DIR;
+      else process.env.MOKUTAB_DATA_DIR = prevData;
+      if (prevState === undefined) delete process.env.MOKUTAB_UPDATE_STATE_DIR;
+      else process.env.MOKUTAB_UPDATE_STATE_DIR = prevState;
+    }
+  });
+
+  function store1(entry: { user: string | null; value: string } | null) {
+    const s = {
+      entry: entry ? { ...entry, live: true, generation: 1 } : (null as any),
+      dead: new Set<string>(),
+    };
+    const routes: Parameters<typeof fakeStore>[0] = {
+      'GET /list': () => ({
+        status: 200,
+        body: {
+          ok: true,
+          entries: s.entry?.live
+            ? [
+                {
+                  account: '1234567_SB2',
+                  user: s.entry.user,
+                  state: 'live',
+                  fp: fingerprint(s.entry.value),
+                  generation: s.entry.generation,
+                  origin: { machine: 'server-2', profile: 'other' },
+                },
+              ]
+            : [],
+        },
+      }),
+      'GET /entry': (_b, q) =>
+        s.entry?.live && (!q.get('user') || q.get('user') === s.entry.user)
+          ? {
+              status: 200,
+              body: entryBody({
+                user: s.entry.user,
+                generation: s.entry.generation,
+                cookies: [cookie('JSESSIONID', s.entry.value)],
+              }),
+            }
+          : { status: 404, body: { ok: false, code: 'none' } },
+      'POST /dead': (b) => {
+        const matched = !!s.entry?.live && fingerprint(s.entry.value) === b.fp;
+        if (matched) {
+          s.entry.live = false;
+          s.dead.add(b.fp);
+        }
+        return { status: 200, body: { ok: true, matched } };
+      },
+    };
+    return { s, routes };
+  }
+  const tr = (t: ReturnType<typeof toolsWith>) =>
+    new NsTransparent(t.tools, { isOn: () => true, now: () => Date.parse('2026-11-26T15:00:00Z') });
+
+  test('a landing whose dead local session matches a live store entry (any user) reports login_redirect and ensures once more', async () => {
+    for (const user of [null, 'support_user@example.com']) {
+      const { s, routes } = store1({ user, value: SECRET });
+      const t = toolsWith(routes, { cookies: [cookie('JSESSIONID', SECRET)], probe: 'dead' });
+      t.users.set('work', '1234567_SB2', 'support_user@example.com');
+      const out = await tr(t).onLanding({ host: HOST, kind: 'tab' }, 'work');
+      const dead = t.store.calls.find((c) => c.route === '/dead');
+      expect(dead?.body).toMatchObject({ fp: fingerprint(SECRET), reason: 'login_redirect' });
+      expect(s.entry.live).toBe(false);
+      expect(s.dead.has(fingerprint(SECRET))).toBe(true);
+      expect(out).toEqual({ action: 'none', reason: 'none' });
+    }
+
+    // When a newer generation is available after reporting dead, ensure imports it.
+    const { s, routes } = store1({ user: 'support_user@example.com', value: SECRET });
+    const baseDead = routes['POST /dead'];
+    routes['POST /dead'] = (b, q) => {
+      const res = baseDead(b, q);
+      s.entry = { user: 'support_user@example.com', value: OTHER, live: true, generation: 2 };
+      return res;
+    };
+    const newer = toolsWith(routes, { cookies: [cookie('JSESSIONID', SECRET)], probe: 'dead' });
+    newer.users.set('work', '1234567_SB2', 'support_user@example.com');
+    const imported = await tr(newer).onLanding({ host: HOST, kind: 'tab' }, 'work');
+    expect(newer.store.calls.find((c) => c.route === '/dead')?.body).toMatchObject({
+      fp: fingerprint(SECRET),
+      reason: 'login_redirect',
+    });
+    expect(imported).toMatchObject({ action: 'navigate', fp: fingerprint(OTHER) });
+    expect(newer.browser.written).toHaveLength(1);
+
+    for (const probe of ['alive', 'unknown'] as const) {
+      const other = store1({ user: null, value: SECRET });
+      const u = toolsWith(other.routes, { cookies: [cookie('JSESSIONID', SECRET)], probe });
+      u.users.set('work', '1234567_SB2', 'support_user@example.com');
+      await tr(u).onLanding({ host: HOST, kind: 'tab' }, 'work');
+      expect(u.store.calls.filter((c) => c.route === '/dead')).toEqual([]);
+      expect(other.s.entry.live).toBe(true);
+    }
+  });
+
+  test('first import is automatic with exactly one live user (and remembered); with two or ambiguous, nothing', async () => {
+    const one = store1({ user: 'support_user@example.com', value: SECRET });
+    const t = toolsWith(one.routes, { cookies: [], probe: 'dead' });
+    const out = await tr(t).onLanding({ host: HOST, kind: 'tab' }, 'work');
+    expect(out).toMatchObject({ action: 'navigate', fp: fingerprint(SECRET) });
+    expect(t.users.get('work', '1234567_SB2')).toBe('support_user@example.com');
+
+    const two = toolsWith(
+      {
+        'GET /list': () => ({
+          status: 200,
+          body: {
+            ok: true,
+            entries: [
+              { account: '1234567_SB2', user: 'a@x.y', state: 'live', fp: 'aaaaaaaa' },
+              { account: '1234567_SB2', user: 'b@x.y', state: 'live', fp: 'bbbbbbbb' },
+            ],
+          },
+        }),
+      },
+      { cookies: [] },
+    );
+    expect(await tr(two).onLanding({ host: HOST, kind: 'tab' }, 'work')).toEqual({
+      action: 'none',
+      reason: 'several_users',
+    });
+    expect(two.browser.written).toEqual([]);
+    expect(two.users.get('work', '1234567_SB2')).toBeNull();
+
+    // Never over a live or unknown local session, first time or not.
+    const liveLocal = toolsWith(store1({ user: 'a@x.y', value: SECRET }).routes, {
+      cookies: [cookie('JSESSIONID', OTHER)],
+      probe: 'alive',
+    });
+    expect((await tr(liveLocal).onLanding({ host: HOST, kind: 'tab' }, 'work')).reason).toBe(
+      'already_live',
+    );
+    expect(liveLocal.browser.written).toEqual([]);
+
+    const unknownLocal = toolsWith(store1({ user: 'a@x.y', value: SECRET }).routes, {
+      cookies: [cookie('JSESSIONID', OTHER)],
+      probe: 'unknown',
+    });
+    expect((await tr(unknownLocal).onLanding({ host: HOST, kind: 'tab' }, 'work')).reason).toBe(
+      'probe_unknown',
+    );
+    expect(unknownLocal.browser.written).toEqual([]);
+
+    // Racing into ambiguous_user on GET /entry still does not import.
+    const race = toolsWith(
+      {
+        'GET /list': () => ({
+          status: 200,
+          body: {
+            ok: true,
+            entries: [{ account: '1234567_SB2', user: 'a@x.y', state: 'live', fp: 'aaaaaaaa' }],
+          },
+        }),
+        'GET /entry': () => ({
+          status: 409,
+          body: {
+            ok: false,
+            code: 'ambiguous_user',
+            users: [
+              { user: 'a@x.y', last_activity: 1 },
+              { user: 'b@x.y', last_activity: 2 },
+            ],
+          },
+        }),
+      },
+      { cookies: [] },
+    );
+    expect(await tr(race).onLanding({ host: HOST, kind: 'tab' }, 'work')).toEqual({
+      action: 'none',
+      reason: 'several_users',
+    });
+    expect(race.browser.written).toEqual([]);
+  });
+
+  test('one log line per transparent event, never a value', async () => {
+    const lines: string[] = [];
+    const spy = jest
+      .spyOn(console, 'error')
+      .mockImplementation((line: any) => void lines.push(String(line)));
+    try {
+      const handler = logged('landing', async () => ({
+        action: 'navigate',
+        fp: 'abcd1234',
+        url: `https://${HOST}/x?${SECRET}`,
+      }));
+      await handler({ host: HOST, target: '/x?' + SECRET }, 'work');
+      const failing = logged('changed', async () => {
+        throw Object.assign(new Error(SECRET), { code: 'NetSuiteSessionError' });
+      });
+      await expect(failing({ host: HOST }, 'work')).rejects.toThrow();
+      const unsafe = logged('activity', async () => {
+        throw Object.assign(new Error(SECRET), { code: SECRET });
+      });
+      await expect(unsafe({ host: HOST }, 'work')).rejects.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines[0]).toMatch(
+      /^\[ns-transparent\] landing 1234567_SB2 profile=work -> navigate abcd1234 \d+ms$/,
+    );
+    expect(lines[1]).toMatch(
+      /^\[ns-transparent\] changed 1234567_SB2 profile=work -> error NetSuiteSessionError \d+ms$/,
+    );
+    expect(lines[2]).toMatch(
+      /^\[ns-transparent\] activity 1234567_SB2 profile=work -> error Error \d+ms$/,
+    );
+    expect(lines.join('\n')).not.toContain(SECRET);
   });
 });
