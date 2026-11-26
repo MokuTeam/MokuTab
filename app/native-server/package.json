@@ -5,6 +5,7 @@
   "main": "dist/index.js",
   "bin": {
     "mokutab-bridge": "./dist/cli.js",
+    "mokutab-run-host": "./dist/run_host.sh",
     "mokutab-stdio": "./dist/mcp/mcp-server-stdio.js",
     "workatomcp-bridge": "./dist/cli.js",
     "workatomcp-stdio": "./dist/mcp/mcp-server-stdio.js",
