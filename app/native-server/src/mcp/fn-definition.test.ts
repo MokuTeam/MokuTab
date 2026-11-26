@@ -292,4 +292,27 @@ describe('bridge tool steps', () => {
       ),
     ).toMatch(/unknown key/);
   });
+
+  test('optional together with commit is refused on any step type', () => {
+    for (const step of [
+      {
+        id: 's',
+        type: 'tool',
+        tool: 'netsuite_session_publish',
+        args: { account: '1' },
+        optional: true,
+        commit: true,
+      },
+      {
+        id: 's',
+        type: 'navigate',
+        url: 'https://acme.example.com/x',
+        optional: true,
+        commit: true,
+      },
+      { id: 's', type: 'wait_for', until: 'true', optional: true, commit: true },
+    ]) {
+      expect(validateDefinition(base([step])).join('\n')).toMatch(/optional and commit together/);
+    }
+  });
 });

@@ -828,6 +828,9 @@ export function validateDefinition(def: unknown): string[] {
         commits += 1;
       }
     }
+    if (step.optional === true && step.commit) {
+      errors.push(`${at}: optional and commit together: a commit that fails must stop the run`);
+    }
     if (step.optional !== undefined && typeof step.optional !== 'boolean') {
       errors.push(`${at}.optional: true or false`);
     }
