@@ -33,6 +33,20 @@ function ofHost(cookie: { domain: string }, host: string): boolean {
   return cookie.domain === host || cookie.domain === `.${host}`;
 }
 
+/** A cookie the store may hand back: of this host, plain strings, a path, no header injection. */
+function validCookie(c: any, host: string): boolean {
+  return (
+    !!c &&
+    typeof c.name === 'string' &&
+    /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(c.name) &&
+    typeof c.value === 'string' &&
+    !/[;\r\n]/.test(c.value) &&
+    typeof c.domain === 'string' &&
+    ofHost(c, host) &&
+    (c.path === undefined || (typeof c.path === 'string' && c.path.startsWith('/')))
+  );
+}
+
 export async function readNsCookies(payload: any): Promise<{ cookies: NsCookie[] }> {
   const host = accountHost(payload);
   const all = await chrome.cookies.getAll({ domain: host });
@@ -58,9 +72,8 @@ export async function writeNsCookies(payload: any): Promise<{ written: number }>
   const host = accountHost(payload);
   const cookies: NsCookie[] = Array.isArray(payload?.cookies) ? payload.cookies : [];
   for (const c of cookies) {
-    if (!c || typeof c.name !== 'string' || typeof c.value !== 'string' || !ofHost(c, host)) {
-      throw new Error(`refused a cookie that is not of ${host}`);
-    }
+    if (!validCookie(c, host))
+      throw new Error(`refused a cookie that is not a plain cookie of ${host}`);
   }
   let written = 0;
   for (const c of cookies) {
@@ -83,6 +96,35 @@ export async function writeNsCookies(payload: any): Promise<{ written: number }>
     if (set) written += 1;
   }
   return { written };
+}
+
+const LOGIN_PATH = /\/app\/login\/|\/pages\/customerlogin|loginchallenge|\/next\/app\/login\//i;
+
+/**
+ * Whether this profile's session for the host is logged in: card.nl, with the
+ * profile's cookies, ends on a page of the same host that is not a login page.
+ * Redirects are followed: a role's home page may be another page (mainsetup.nl).
+ */
+export async function probeNsSession(payload: any): Promise<{ alive: boolean }> {
+  const host = accountHost(payload);
+  try {
+    const response = await fetch(`https://${host}/app/center/card.nl`, {
+      credentials: 'include',
+      redirect: 'follow',
+      cache: 'no-store',
+    });
+    let final: URL;
+    try {
+      final = new URL(response.url);
+    } catch {
+      return { alive: false };
+    }
+    return {
+      alive: response.ok && final.hostname === host && !LOGIN_PATH.test(final.pathname),
+    };
+  } catch {
+    return { alive: false };
+  }
 }
 
 /** The user and role of an open, logged-in tab of the account (MAIN world nlapiGetContext). */

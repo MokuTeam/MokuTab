@@ -10,7 +10,7 @@ import {
   NativeMessageType,
 } from '@mokuhub/mokutab-shared';
 import type { ExtensionModule } from '../../extension-module';
-import { nsTabIdentity, readNsCookies, writeNsCookies } from './cookies';
+import { nsTabIdentity, probeNsSession, readNsCookies, writeNsCookies } from './cookies';
 
 const DESCRIPTION_KEY = 'moduleDescription_netsuite';
 const DESCRIPTION = 'NetSuite sessions shared between machines through the session store.';
@@ -32,5 +32,6 @@ export const netsuiteExtensionModule: ExtensionModule = {
     [NativeMessageType.NS_COOKIES_READ]: readNsCookies,
     [NativeMessageType.NS_COOKIES_WRITE]: writeNsCookies,
     [NativeMessageType.NS_TAB_IDENTITY]: nsTabIdentity,
+    [NativeMessageType.NS_SESSION_PROBE]: probeNsSession,
   },
 };
