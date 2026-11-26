@@ -106,27 +106,42 @@ describe('writeNsCookies', () => {
 });
 
 describe('probeNsSession', () => {
-  const answer = (url: string, ok = true) => vi.fn(async () => ({ ok, url }) as any);
+  const cancel = vi.fn(async () => {});
+  const answer = (url: string, ok = true, status = 200) =>
+    vi.fn(async () => ({ ok, status, url, body: { cancel } }) as any);
 
-  test('alive when card.nl ends on a page of the host that is not a login page', async () => {
-    (globalThis as any).fetch = answer(`https://${HOST}/app/center/card.nl`);
-    expect(await probeNsSession({ host: HOST })).toEqual({ alive: true });
-    (globalThis as any).fetch = answer(`https://${HOST}/app/setup/mainsetup.nl`);
-    expect(await probeNsSession({ host: HOST })).toEqual({ alive: true });
+  test('alive on a page of the host that is not a login page, the role chooser included', async () => {
+    for (const path of [
+      '/app/center/card.nl',
+      '/app/setup/mainsetup.nl',
+      '/app/login/secure/chooserole.nl',
+    ]) {
+      (globalThis as any).fetch = answer(`https://${HOST}${path}`);
+      expect(await probeNsSession({ host: HOST })).toEqual({ state: 'alive' });
+    }
+    expect(cancel).toHaveBeenCalled();
   });
 
-  test('dead on a login page, another host, an error status or a failed fetch', async () => {
+  test('dead only on a login page of the account host', async () => {
+    (globalThis as any).fetch = answer(
+      `https://${HOST}/app/login/secure/enterpriselogin.nl?c=1234567_SB2`,
+    );
+    expect(await probeNsSession({ host: HOST })).toEqual({ state: 'dead' });
+  });
+
+  test('unknown on a network error, 429, 5xx, another host or another error status', async () => {
     for (const fetchFn of [
-      answer(`https://${HOST}/app/login/secure/enterpriselogin.nl?c=1234567_SB2`),
-      answer('https://system.netsuite.com/pages/customerlogin.jsp'),
-      answer('https://login.microsoftonline.com/x'),
-      answer(`https://${HOST}/app/center/card.nl`, false),
       vi.fn(async () => {
         throw new Error('offline');
       }),
+      answer(`https://${HOST}/app/center/card.nl`, false, 429),
+      answer(`https://${HOST}/app/center/card.nl`, false, 503),
+      answer(`https://${HOST}/app/center/card.nl`, false, 404),
+      answer('https://system.netsuite.com/pages/customerlogin.jsp'),
+      answer('https://login.microsoftonline.com/x'),
     ]) {
       (globalThis as any).fetch = fetchFn;
-      expect(await probeNsSession({ host: HOST })).toEqual({ alive: false });
+      expect(await probeNsSession({ host: HOST })).toEqual({ state: 'unknown' });
     }
   });
 });

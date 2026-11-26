@@ -100,31 +100,44 @@ export async function writeNsCookies(payload: any): Promise<{ written: number }>
 
 const LOGIN_PATH = /\/app\/login\/|\/pages\/customerlogin|loginchallenge|\/next\/app\/login\//i;
 
+export type NsSessionState = 'alive' | 'dead' | 'unknown';
+
 /**
- * Whether this profile's session for the host is logged in: card.nl, with the
- * profile's cookies, ends on a page of the same host that is not a login page.
- * Redirects are followed: a role's home page may be another page (mainsetup.nl).
+ * Whether this profile's session for the host is logged in, by where card.nl
+ * ends with the profile's cookies (redirects followed: a role's home page may
+ * be another page, mainsetup.nl). Dead only on a login page of the account
+ * host; the role chooser (chooserole.nl) is a live session waiting for a pick.
+ * A network error, 429, 5xx, any other error status or another host is
+ * unknown: never taken for dead.
  */
-export async function probeNsSession(payload: any): Promise<{ alive: boolean }> {
+export async function probeNsSession(payload: any): Promise<{ state: NsSessionState }> {
   const host = accountHost(payload);
+  let response: Response;
   try {
-    const response = await fetch(`https://${host}/app/center/card.nl`, {
+    response = await fetch(`https://${host}/app/center/card.nl`, {
       credentials: 'include',
       redirect: 'follow',
       cache: 'no-store',
     });
-    let final: URL;
-    try {
-      final = new URL(response.url);
-    } catch {
-      return { alive: false };
-    }
-    return {
-      alive: response.ok && final.hostname === host && !LOGIN_PATH.test(final.pathname),
-    };
   } catch {
-    return { alive: false };
+    return { state: 'unknown' };
   }
+  // Only the URL matters: never read (or keep) the page.
+  try {
+    void response.body?.cancel().catch(() => {});
+  } catch {
+    /* no body */
+  }
+  let final: URL;
+  try {
+    final = new URL(response.url);
+  } catch {
+    return { state: 'unknown' };
+  }
+  if (final.hostname !== host) return { state: 'unknown' };
+  if (/chooserole\.nl$/i.test(final.pathname)) return { state: 'alive' };
+  if (LOGIN_PATH.test(final.pathname)) return { state: 'dead' };
+  return { state: response.ok ? 'alive' : 'unknown' };
 }
 
 /** The user and role of an open, logged-in tab of the account (MAIN world nlapiGetContext). */
