@@ -1,6 +1,6 @@
 {
   "name": "@mokuhub/mokutab-bridge",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "description": "MokuTab native messaging host (Chrome ↔ MCP bridge)",
   "main": "dist/index.js",
   "bin": {

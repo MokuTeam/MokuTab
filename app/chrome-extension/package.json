@@ -3,7 +3,7 @@
   "description": "Chrome extension that exposes the user's logged-in browser session as MCP tools for AI agents.",
   "author": "Roman Chikalenko <chikalenkor@gmail.com>",
   "private": true,
-  "version": "2.2.1",
+  "version": "2.3.0",
   "type": "module",
   "scripts": {
     "dev": "wxt",
