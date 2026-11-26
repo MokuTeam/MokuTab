@@ -91,9 +91,58 @@ function fnDeps(): FnDeps {
       connectedProfiles: () => profileRegistry.getConnectedProfiles(),
       activeProfile: () => profileRegistry.getActiveProfile(),
       now: () => Date.now(),
+      callBridgeTool: (name, args, profile, timeoutMs) =>
+        callModuleToolForFunction(name, args, profile, timeoutMs),
     };
   }
   return fnDepsInstance;
+}
+
+/**
+ * A module's bridge-side tool, called from a browser function step: the
+ * owning module must be installed and on, and must answer it in the bridge.
+ */
+async function callModuleToolForFunction(
+  name: string,
+  args: Record<string, unknown>,
+  profile: string,
+  timeoutMs: number,
+): Promise<CallToolResult> {
+  const owner = INSTALLED_MODULES.find((module) => module.owns(name));
+  if (!owner?.handle) {
+    return {
+      content: [{ type: 'text', text: `Error: ${name} is not a bridge tool` }],
+      isError: true,
+    };
+  }
+  if (!moduleSwitch.isEnabled(owner.id)) {
+    return { content: [{ type: 'text', text: moduleOffMessage(owner, name) }], isError: true };
+  }
+  const handled = owner.handle(name, args, {
+    profile,
+    session: null,
+    callExtension: async (toolName, toolArgs) => {
+      const response = await sendRequestToExtension(
+        { name: toolName, args: toolArgs },
+        NativeMessageType.CALL_TOOL,
+        timeoutMs,
+        profile,
+      );
+      return response.status === 'success'
+        ? response.data
+        : {
+            content: [{ type: 'text', text: `Error calling tool: ${response.error}` }],
+            isError: true,
+          };
+    },
+  });
+  if (!handled) {
+    return {
+      content: [{ type: 'text', text: `Error: ${name} is not answered in the bridge` }],
+      isError: true,
+    };
+  }
+  return handled;
 }
 
 export const PROFILE_ROUTING_ARG = 'profile';

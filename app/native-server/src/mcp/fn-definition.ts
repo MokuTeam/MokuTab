@@ -13,6 +13,7 @@
  */
 
 import { createHash } from 'crypto';
+import { NETSUITE_FN_TOOL_NAMES } from '@mokuhub/mokutab-shared';
 
 export type FnKind = 'read' | 'write' | 'send';
 export const FN_KINDS: readonly FnKind[] = ['read', 'write', 'send'];
@@ -54,6 +55,13 @@ export const FN_TOOL_ALLOWLIST: readonly string[] = [
   'chrome_search_page',
 ];
 
+/**
+ * Bridge tools a `tool` step may call. They run in the bridge, not in the
+ * function's tab (no tabId is added): the NetSuite session store tools, so a
+ * login function can take a shared session first and publish the new one.
+ */
+export const FN_BRIDGE_TOOL_ALLOWLIST: readonly string[] = NETSUITE_FN_TOOL_NAMES;
+
 /** A page or step condition, checked by `when`, `wait_for` and `verify`. */
 export interface FnCondition {
   /** Regex tested against the tab URL (tabs API: works on any page). */
@@ -64,7 +72,10 @@ export interface FnCondition {
   missing?: string;
   /** JS expression evaluated in the page with args, prev and h. */
   js?: string;
-  /** With equals / in: compare the value of an earlier step. */
+  /**
+   * With equals / in: compare the value of an earlier step, or one field of
+   * it (`store.state`: the state field of step store's value).
+   */
   step?: string;
   equals?: unknown;
   in?: unknown[];
@@ -88,9 +99,11 @@ export interface FnStep {
   any?: FnCondition[];
   /** js / verify: body of an async function with args, prev and h in scope. */
   code?: string;
-  /** tool: an allowlisted browser tool and its arguments (string values are templates). */
+  /** tool: an allowlisted browser or bridge tool and its arguments (string values are templates). */
   tool?: string;
   args?: Record<string, unknown>;
+  /** tool: a failure becomes the step value {state: 'error', error} instead of failing the run. */
+  optional?: boolean;
   /** pause: params the caller supplies when it resumes. */
   needs?: string[];
   /** pause / fail: text for the caller (a template). */
@@ -601,7 +614,7 @@ const STEP_KEYS: Record<FnStepType, readonly string[]> = {
   wait_for: [...STEP_COMMON_KEYS, 'until', 'any'],
   js: [...STEP_COMMON_KEYS, 'code'],
   verify: [...STEP_COMMON_KEYS, 'code'],
-  tool: [...STEP_COMMON_KEYS, 'tool', 'args'],
+  tool: [...STEP_COMMON_KEYS, 'tool', 'args', 'optional'],
   pause: [...STEP_COMMON_KEYS, 'needs', 'message'],
   finish: [...STEP_COMMON_KEYS, 'value'],
   fail: [...STEP_COMMON_KEYS, 'message'],
@@ -665,7 +678,8 @@ function checkCondition(
     if (err) errors.push(`${at}.js: ${err}`);
   }
   if (c.step !== undefined) {
-    if (!earlier.has(c.step)) errors.push(`${at}.step: "${c.step}" is not an earlier step`);
+    const head = typeof c.step === 'string' ? c.step.split('.')[0] : '';
+    if (!earlier.has(head)) errors.push(`${at}.step: "${c.step}" is not an earlier step`);
     if (c.equals === undefined && !Array.isArray(c.in)) {
       errors.push(`${at}: step needs equals or in`);
     }
@@ -853,8 +867,16 @@ export function validateDefinition(def: unknown): string[] {
         break;
       }
       case 'tool':
-        if (typeof step.tool !== 'string' || !FN_TOOL_ALLOWLIST.includes(step.tool)) {
-          errors.push(`${at}.tool: one of ${FN_TOOL_ALLOWLIST.join(', ')}`);
+        if (
+          typeof step.tool !== 'string' ||
+          !(FN_TOOL_ALLOWLIST.includes(step.tool) || FN_BRIDGE_TOOL_ALLOWLIST.includes(step.tool))
+        ) {
+          errors.push(
+            `${at}.tool: one of ${[...FN_TOOL_ALLOWLIST, ...FN_BRIDGE_TOOL_ALLOWLIST].join(', ')}`,
+          );
+        }
+        if (step.optional !== undefined && typeof step.optional !== 'boolean') {
+          errors.push(`${at}.optional: true or false`);
         }
         if (
           step.args !== undefined &&

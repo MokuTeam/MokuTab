@@ -78,6 +78,27 @@ export interface FnDeps {
   connectedProfiles(): string[];
   activeProfile(): string | null;
   now(): number;
+  /**
+   * Run a bridge tool (FN_BRIDGE_TOOL_ALLOWLIST) in a profile, the way the
+   * router would: refused while its module is off.
+   */
+  callBridgeTool?(
+    name: string,
+    args: Record<string, unknown>,
+    profile: string,
+    timeoutMs: number,
+  ): Promise<CallToolResult>;
+}
+
+/** The profile's driver, plus bridge tools when the deps can run them. */
+function driverWithBridgeTools(deps: FnDeps, profile: string): FnDriver {
+  const driver = deps.driverFor(profile);
+  const call = deps.callBridgeTool;
+  if (!call || driver.callBridgeTool) return driver;
+  return {
+    ...driver,
+    callBridgeTool: (name, args, timeoutMs) => call(name, args, profile, timeoutMs),
+  };
 }
 
 interface PendingRun {
@@ -597,7 +618,7 @@ async function runToEnd(
 ): Promise<CallToolResult> {
   const { deps } = opts;
   const started = deps.now();
-  const runner = new FnRunner(deps.driverFor(profile), opts.signal, deps.vault, {
+  const runner = new FnRunner(driverWithBridgeTools(deps, profile), opts.signal, deps.vault, {
     // Written before the commit runs: a bridge that dies mid-commit still blocks a duplicate.
     onCommitStart: (s) => {
       appendQuietly(
