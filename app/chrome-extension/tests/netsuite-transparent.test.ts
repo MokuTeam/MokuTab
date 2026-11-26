@@ -40,6 +40,7 @@ function harness(over: Partial<NsWatchEnv> & { answer?: (s: Sent) => any; on?: b
   let nextId = 1;
   const sent: Sent[] = [];
   const navigated: Array<{ tabId: number; url: string }> = [];
+  const readyListeners: Array<() => void> = [];
   let on = over.on ?? true;
   const env: NsWatchEnv = {
     enabled: async () => on,
@@ -63,6 +64,9 @@ function harness(over: Partial<NsWatchEnv> & { answer?: (s: Sent) => any; on?: b
       if (i >= 0) timers.splice(i, 1);
     },
     ownOrigin: OWN,
+    onBridgeReady: (listener) => {
+      readyListeners.push(listener);
+    },
     ...over,
   };
   const advance = async (ms: number) => {
@@ -75,11 +79,16 @@ function harness(over: Partial<NsWatchEnv> & { answer?: (s: Sent) => any; on?: b
     }
     await new Promise((r) => setTimeout(r, 0));
   };
+  const triggerReady = async () => {
+    for (const listener of [...readyListeners]) listener();
+    await new Promise((r) => setTimeout(r, 0));
+  };
   return {
     watcher: new NsWatcher(env),
     sent,
     navigated,
     advance,
+    triggerReady,
     setOn: (v: boolean) => (on = v),
   };
 }
@@ -146,6 +155,47 @@ describe('publish on a new JSESSIONID', () => {
     h.watcher.onCookieChanged(changed());
     await h.advance(CHANGE_DEBOUNCE_MS);
     expect(h.sent).toEqual([]);
+  });
+
+  test('a session change lost to a closed socket or pending module state is retried once onBridgeReady', async () => {
+    let fail = true;
+    const h = harness({
+      answer: () => {
+        if (fail) throw new Error('the bridge connection closed');
+        return { state: 'published' };
+      },
+    });
+    await h.watcher.onCommitted({
+      url: `https://${HOST}/app/login/secure/authenticaterole.nl`,
+      frameId: 0,
+      tabId: 1,
+    });
+    h.watcher.onCookieChanged(changed());
+    await h.advance(CHANGE_DEBOUNCE_MS);
+    expect(h.sent).toHaveLength(1);
+    // Reconnected: retried once with after_login preserved.
+    fail = false;
+    await h.triggerReady();
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent[1].payload).toEqual({ host: HOST, after_login: true });
+    await h.triggerReady();
+    expect(h.sent).toHaveLength(2);
+
+    // Module state temporarily unavailable while reconnecting, then ready; second failure drops it.
+    const drop = harness({
+      on: false,
+      answer: () => {
+        throw new Error('not connected to the bridge');
+      },
+    });
+    drop.watcher.onCookieChanged(changed());
+    await drop.advance(CHANGE_DEBOUNCE_MS);
+    expect(drop.sent).toEqual([]);
+    drop.setOn(true);
+    await drop.triggerReady();
+    expect(drop.sent).toHaveLength(1);
+    await drop.triggerReady();
+    expect(drop.sent).toHaveLength(1);
   });
 });
 

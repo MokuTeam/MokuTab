@@ -10,6 +10,12 @@ import {
   BridgeRequests,
   type BridgeSocket,
 } from '@/entrypoints/background/bridge-requests';
+import {
+  BRIDGE_RECONNECT_WAIT_MS,
+  askBridge,
+  notifyBridgeReady,
+  setBridgeSender,
+} from '@/entrypoints/background/bridge-channel';
 import { createModulePopupHandlers } from '@/entrypoints/background/module-popup';
 
 const OPEN = 1;
@@ -39,6 +45,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setBridgeSender(null);
   vi.useRealTimers();
 });
 
@@ -200,5 +207,62 @@ describe('the popup handlers', () => {
       type: NativeMessageType.MODULES_SET,
       payload: { id: 'workato', enabled: false },
     });
+  });
+});
+
+describe('askBridge reconnect retry', () => {
+  test('a closed socket or missing sender waits once for notifyBridgeReady and retries', async () => {
+    const calls: string[] = [];
+    const pending = askBridge('ns_session_changed', { host: '1234567.app.netsuite.com' });
+    setBridgeSender(async (type) => {
+      calls.push(type);
+      return { state: 'published' };
+    });
+    notifyBridgeReady();
+    await expect(pending).resolves.toEqual({ state: 'published' });
+    expect(calls).toEqual(['ns_session_changed']);
+
+    let attempt = 0;
+    setBridgeSender(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error('the bridge connection closed');
+      return { ok: true };
+    });
+    const closedPending = askBridge('ns_activity', { host: '1234567.app.netsuite.com' });
+    await Promise.resolve();
+    notifyBridgeReady();
+    await expect(closedPending).resolves.toEqual({ ok: true });
+    expect(attempt).toBe(2);
+  });
+
+  test('a failed retry does not retry a second time', async () => {
+    let attempts = 0;
+    setBridgeSender(async () => {
+      attempts += 1;
+      throw new Error('the bridge connection closed');
+    });
+    const pending = askBridge('ns_session_changed', { host: '1234567.app.netsuite.com' });
+    await Promise.resolve();
+    notifyBridgeReady();
+    await expect(pending).rejects.toThrow('the bridge connection closed');
+    expect(attempts).toBe(2);
+  });
+
+  test('gives up when the bridge does not reconnect within the wait window', async () => {
+    setBridgeSender(null);
+    const pending = askBridge('ns_session_changed', { host: '1234567.app.netsuite.com' }, 20_000);
+    const outcome = expect(pending).rejects.toThrow('not connected to the bridge');
+    await vi.advanceTimersByTimeAsync(BRIDGE_RECONNECT_WAIT_MS);
+    await outcome;
+  });
+
+  test('non-socket errors reject immediately without waiting', async () => {
+    let attempts = 0;
+    setBridgeSender(async () => {
+      attempts += 1;
+      throw new Error('unknown module "x"');
+    });
+    await expect(askBridge('ns_session_changed', {})).rejects.toThrow('unknown module "x"');
+    expect(attempts).toBe(1);
   });
 });

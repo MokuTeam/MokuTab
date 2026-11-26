@@ -7,9 +7,9 @@
  *
  * Nothing here overwrites a live session: before an import or a bounce
  * report the profile's own session is checked, and only a dead one (or none)
- * is replaced. A profile takes an account's session on its own only after it
- * took that account once explicitly (netsuite_session_ensure, netsuite.login),
- * which is when it remembers the user.
+ * is replaced. A profile with no expected user imports on its own when the
+ * store has one live user for the account, and remembers it; with two or more
+ * it does nothing.
  */
 
 import { accountFromHost, type NsAccount } from './account';
@@ -96,25 +96,26 @@ export class NsTransparent {
   /**
    * ns_login_landing {host, kind: tab|fetch, target?}: a page or a background
    * request of the profile landed on the account's login page.
-   * - The profile has never taken this account: nothing (that first time is
-   *   an explicit ensure or a login).
    * - Its own session is logged in after all (a stale page, a second tab):
    *   no import; a tab goes on to its target.
-   * - Its session is dead or missing: take the store's live session for the
-   *   expected user; a tab goes on to its target.
+   * - Its own session is unknown: leave it alone.
+   * - Its session is dead or missing: if the profile has no remembered user,
+   *   import only when the store has one live user for the account (and
+   *   remember it); with two or more, do nothing. If the dead local session's
+   *   fp matches a live store entry, report it dead (login_redirect) before
+   *   ensuring once more for a newer generation.
    * When the session this guard imported is found dead on a new landing, it is
    * reported dead (import_bounced) and the store is asked once more.
    */
   async onLanding(payload: any, profile: string): Promise<Json> {
     const account = this.ready(payload);
     if ('reason' in account) return { action: 'none', reason: account.reason };
-    if (!this.tools.expectedUser(profile, account)) {
-      return { action: 'none', reason: 'no_expected_user' };
-    }
+    const expected = this.tools.expectedUser(profile, account);
     const key = `${profile}|${account.host}`;
     const now = this.deps.now();
     const last = this.imports.get(key);
     const local = await this.tools.localFingerprint(account, profile).catch(() => null);
+    let live: Array<Record<string, any>> | null = null;
     let bounced = false;
     if (local) {
       const state = await this.tools.probe(account, profile);
@@ -126,9 +127,30 @@ export class NsTransparent {
         await this.tools.reportDead(account, local, 'import_bounced', profile).catch(() => false);
         bounced = true;
         last.retried = true;
+      } else {
+        // The store still offers this very session (any user, also none) as
+        // live: it is dead, say so, and ask for a newer one below.
+        live = await this.tools.liveEntries(account, profile).catch(() => []);
+        if (live.some((e) => e.fp === local)) {
+          const killed = await this.tools
+            .reportDead(account, local, 'login_redirect', profile)
+            .catch(() => false);
+          if (killed) live = null;
+        }
       }
     } else if (last && now - last.at < IMPORT_GUARD_MS) {
       return { action: 'none', reason: 'loop_guard' };
+    }
+    // A profile that never took this account takes it on its own only when
+    // the store has exactly one live user for it; with two or more the
+    // popup or an explicit ensure decides.
+    if (!expected) {
+      live ??= await this.tools.liveEntries(account, profile).catch(() => []);
+      const users = new Set(
+        live.map((e) => (typeof e.user === 'string' ? e.user.trim().toLowerCase() : '')),
+      );
+      if (users.size === 0) return { action: 'none', reason: 'none' };
+      if (users.size > 1) return { action: 'none', reason: 'several_users' };
     }
     const result = await this.tools.ensureExpected(account, profile);
     if (result.state === 'already_live') return this.alreadyLive(account, payload, profile);

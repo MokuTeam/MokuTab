@@ -4,7 +4,7 @@
  * and handles MCP tool execution requests from the native server.
  *
  * Author: Roman Chikalenko
- * Version: 1.4.0
+ * Version: 1.4.1
  */
 import { NativeMessageType } from '@mokuhub/mokutab-shared';
 import { BACKGROUND_MESSAGE_TYPES } from '@/common/message-types';
@@ -19,7 +19,7 @@ import { answerModuleBridgeRequest, findModuleBridgeRequest } from './module-bri
 import { EXTENSION_MODULES } from './modules';
 import { moduleStatesOf, readStoredModulesState } from '@/common/module-state';
 import { BridgeRequests } from './bridge-requests';
-import { setBridgeSender } from './bridge-channel';
+import { notifyBridgeReady, setBridgeSender } from './bridge-channel';
 import { createModulePopupHandlers } from './module-popup';
 
 const LOG_PREFIX = '[NativeHost]';
@@ -398,6 +398,8 @@ async function onBridgeModulesState(payload: unknown): Promise<void> {
     .catch(() => {
       // No popup open.
     });
+  // Modules that could not reach the bridge while it was away try again now.
+  notifyBridgeReady();
 }
 
 /** get_modules / set_module from the popup, answered over the bridge socket. */

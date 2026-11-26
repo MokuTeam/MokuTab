@@ -14,7 +14,7 @@
 
 import { NativeMessageType } from '@mokuhub/mokutab-shared';
 import { STORAGE_KEYS } from '@/common/constants';
-import { askBridge } from '../../bridge-channel';
+import { askBridge, onBridgeReady } from '../../bridge-channel';
 import { moduleExplicitlyOn } from '../../extension-module';
 import { ACCOUNT_HOST, ownWriteRecent } from './cookies';
 
@@ -51,6 +51,8 @@ export interface NsWatchEnv {
   clearTimer(handle: unknown): void;
   /** This extension's own origin: its own requests (the session probe) are not reports. */
   ownOrigin: string;
+  /** Called when the bridge is back (reconnected, module state pushed). */
+  onBridgeReady?(listener: () => void): void;
 }
 
 function parse(url: string | undefined): URL | null {
@@ -79,7 +81,47 @@ export class NsWatcher {
   private readonly fetchLandings = new Map<string, number>();
   private readonly activity = new Map<string, number>();
 
-  constructor(private readonly env: NsWatchEnv) {}
+  /** Hosts whose session change could not be delivered: sent once more when the bridge is back. */
+  private readonly retryWhenReady = new Map<string, boolean>();
+
+  constructor(private readonly env: NsWatchEnv) {
+    env.onBridgeReady?.(() => {
+      for (const [host, afterLogin] of [...this.retryWhenReady]) {
+        this.retryWhenReady.delete(host);
+        void this.sendChange(host, afterLogin, true);
+      }
+    });
+  }
+
+  /**
+   * Deliver a session change. When it cannot be delivered (no bridge, a
+   * closed socket, the module state not pushed yet after a reconnect) it is
+   * kept and sent once more when the bridge is back; a second failure drops it.
+   */
+  private async sendChange(host: string, afterLogin: boolean, retry = false): Promise<void> {
+    const ok =
+      (await this.env.enabled()) &&
+      (await this.env
+        .ask(
+          NativeMessageType.NS_SESSION_CHANGED,
+          { host, after_login: afterLogin },
+          CHANGE_TIMEOUT_MS,
+        )
+        .then(() => true)
+        .catch(
+          (err: any) =>
+            !/not connected|connection closed|did not answer/i.test(String(err?.message ?? err)),
+        ));
+    if (ok) {
+      this.retryWhenReady.delete(host);
+      return;
+    }
+    // Not delivered: it must not hold the 30 s interval either.
+    this.lastChangeSent.delete(host);
+    if (!retry) {
+      this.retryWhenReady.set(host, afterLogin || (this.retryWhenReady.get(host) ?? false));
+    }
+  }
 
   private async send(type: string, payload: Record<string, unknown>, timeoutMs?: number) {
     if (!(await this.env.enabled())) return null;
@@ -121,11 +163,7 @@ export class NsWatcher {
         this.lastChangeSent.set(host, now);
         const step = this.loginSteps.get(host);
         const afterLogin = step !== undefined && now - step < LOGIN_STEP_WINDOW_MS;
-        void this.send(
-          NativeMessageType.NS_SESSION_CHANGED,
-          { host, after_login: afterLogin },
-          CHANGE_TIMEOUT_MS,
-        );
+        void this.sendChange(host, afterLogin);
       }, delay),
     );
   }
@@ -252,6 +290,9 @@ export function startNsTransparent(): void {
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
     ownOrigin: `chrome-extension://${chrome.runtime.id}`,
+    onBridgeReady: (listener) => {
+      onBridgeReady(listener);
+    },
   });
   const netsuite = [{ hostSuffix: '.app.netsuite.com' }];
   chrome.cookies?.onChanged.addListener((info) => watcher.onCookieChanged(info as any));

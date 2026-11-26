@@ -4,6 +4,12 @@ All notable changes to MokuTab, called WorkatoMCP before 2.0. Versions refer to 
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. Dates are the commit dates of the corresponding release.
 
+## Unreleased
+
+### Fixed
+
+- **`dist/run_host.sh` lost its exec bit in the npm package** when it was packed on Windows, so Chrome could not start the native host after an install with `--ignore-scripts`. It is now declared as the `mokutab-run-host` bin, which the packer always marks executable.
+
 ## bridge 2.4.0 · shared 2.4.0 (2026-11-26)
 
 ### Added
