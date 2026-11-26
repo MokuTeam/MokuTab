@@ -67,6 +67,16 @@ The `netsuite` module (off by default, switched on in the popup) is a client of 
 - An extension older than the bridge answers an unknown request type at once, and the bridge waits at most 5 s (12 s for the session check) for these requests.
 - `netsuite.login` v14 (a vault function in the registry) uses these tools from its steps; it needs this bridge.
 
+### Transparent mode
+
+While the module is on, the extension reports what happens on a NetSuite account host by host only (never a cookie value), and the bridge acts. A profile can turn it off with `nsTransparent: false` in the extension's storage (default on).
+
+- A new `JSESSIONID` (not one an import just wrote) is reported 3 s after the last change (`ns_session_changed`); the bridge publishes it, with `login_at` only when a login step (`authenticaterole.nl`, the two-factor page) passed in the last minute. This keeps the store's copy current when NetSuite reissues a session without a login.
+- A tab landing on `loginrouter.nl`, `enterpriselogin.nl` or `customerlogin` of an account host, or a background request redirected there (not the extension's own), is reported (`ns_login_landing`). The bridge runs `ensure` for the profile's expected user and, on an import, the tab goes to its `redirect` target (or card.nl). One import per host and profile per 60 s; when the imported session lands on the login page again, it is reported dead (`import_bounced`) and the store is asked once more for a newer one.
+- A page or XHR answering 200 on an account host is reported at most every 30 s (`ns_activity`); the bridge sends `POST /touch` at most every 2 min per host and publishes a session the store does not know.
+- A navigation to `changeaccount.nl`, `changerole.nl`, `chooserole.nl` or a logout page reports the session ending (`ns_session_ending`, reason `switch` or `logout`); the bridge reports the local session dead.
+- `netsuite_session_status` names the users the calling profile expects (`expected_users`).
+
 ## Development
 
 ```bash
