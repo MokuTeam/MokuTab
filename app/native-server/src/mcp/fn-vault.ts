@@ -67,7 +67,7 @@ const realHost = (): VaultHost => ({
 });
 
 /**
- * The session key in a session file: the value of a BW_SESSION= line (an
+ * The session key in a session file: the value of the last BW_SESSION= line (an
  * `export` and quotes are allowed, as a shell env file has them), or the
  * file's only line when it is a bare key. Null when there is none.
  */
@@ -76,7 +76,8 @@ export function parseSessionFile(text: string): string | null {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith('#'));
-  for (const line of lines) {
+  // The last assignment wins, as when a shell sources the file.
+  for (const line of [...lines].reverse()) {
     const match = /^(?:export\s+)?BW_SESSION\s*=\s*(.*)$/.exec(line);
     if (!match) continue;
     let value = match[1].trim();
@@ -109,8 +110,28 @@ export function bwAppDataDir(host: VaultHost): string | undefined {
   const viaXdg = path.join(xdg, 'Bitwarden CLI');
   const usual = path.join(host.home, '.config', 'Bitwarden CLI');
   if (path.resolve(viaXdg) === path.resolve(usual)) return undefined;
-  if (host.exists(path.join(viaXdg, 'data.json'))) return undefined;
-  return host.exists(path.join(usual, 'data.json')) ? usual : undefined;
+  if (hasBwLogin(host, viaXdg)) return undefined;
+  return hasBwLogin(host, usual) ? usual : undefined;
+}
+
+/**
+ * Whether a bw data dir holds a logged-in account. Not just data.json: bw
+ * writes a stub one ({"stateVersion": ...}) on any run, also a failed one.
+ * Only key names are looked at.
+ */
+function hasBwLogin(host: VaultHost, dir: string): boolean {
+  const file = path.join(dir, 'data.json');
+  if (!host.exists(file)) return false;
+  try {
+    const data = JSON.parse(host.readFile(file));
+    if (!data || typeof data !== 'object') return false;
+    return (
+      Object.keys(data).some((key) => key.startsWith('user_')) ||
+      !!(data as Record<string, unknown>).global_account_activeAccountId
+    );
+  } catch {
+    return false;
+  }
 }
 
 type Exec = (

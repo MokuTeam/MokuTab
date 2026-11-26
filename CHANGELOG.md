@@ -8,13 +8,13 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) co
 
 ### Added
 
-- **`MOKUTAB_BW_SESSION_FILE`.** The vault reads the Bitwarden session key from this file on every call (a bare key, or a `BW_SESSION=` line as a shell env file has it), after the Windows user environment and before `BW_SESSION`. A re-unlock that rewrites the file reaches a running bridge without a restart.
-- **`MOKUTAB_BW_APPDATA`** sets bw's data dir. Without it, on Linux, when the host sets `XDG_CONFIG_HOME` per Chrome profile and that dir has no bw data while `~/.config/Bitwarden CLI` has, the vault points bw there instead of failing with "You are not logged in".
+- **`MOKUTAB_BW_SESSION_FILE`.** The vault reads the Bitwarden session key from this file on every call (a bare key, or the last `BW_SESSION=` line, as a shell env file has it), after the Windows user environment and before `BW_SESSION`. A re-unlock that rewrites the file reaches a running bridge without a restart.
+- **`MOKUTAB_BW_APPDATA`** sets bw's data dir. Without it, on Linux, when the host sets `XDG_CONFIG_HOME` per Chrome profile and that dir holds no bw login while `~/.config/Bitwarden CLI` does, the vault points bw there instead of failing with "You are not logged in".
 - **`MOKUTAB_DEFAULT_PROFILE`** pins the bridge's default profile over `default-profile.json` and `chrome_switch_profile` (a switch still moves the active profile until the pinned one reconnects).
 
 ### Fixed
 
-- **A default profile that no longer exists.** `default-profile.json` now records when each profile last connected. A remembered default that has not connected for 7 days (a renamed or deleted profile) gives way to the profile that connects, which is saved as the new default. Before, the first profile to reconnect after every restart became the default without being saved.
+- **A default profile that no longer exists.** `default-profile.json` now records how long the default has been away. A remembered default that has been away for 7 days of bridge running time (a renamed or deleted profile; time with the bridge stopped or the machine asleep counts nothing) gives way to the profile that connects, which is saved as the new default. Before, the first profile to reconnect after every restart became the default without being saved.
 
 ## bridge 2.1.0 · shared 2.1.0 (2026-11-20)
 

@@ -250,93 +250,131 @@ describe('ProfileRegistry default-profile persistence', () => {
   });
 
   const DAY = 24 * 60 * 60 * 1000;
+  const HOUR = 60 * 60 * 1000;
   const NOW = Date.parse('2026-11-26T12:00:00Z');
 
-  test('a default that has not connected for over 7 days gives way to the profile that connects', () => {
+  function registryAt(file: string, clock: { t: number }, env: NodeJS.ProcessEnv = {}) {
+    const registry = new ProfileRegistry();
+    registry.enablePreferencePersistence(file, { env, now: () => clock.t, heartbeat: false });
+    return registry;
+  }
+
+  /** The hourly heartbeat, run by hand. */
+  function runFor(registry: ProfileRegistry, clock: { t: number }, ms: number) {
+    for (let done = 0; done < ms; done += HOUR) {
+      clock.t += HOUR;
+      registry.flushPreference();
+    }
+  }
+
+  test('a default away for 7 days of bridge running time gives way to the profile that connects', () => {
     jest.spyOn(console, 'error').mockImplementation(() => {});
     const file = tempFile();
-    fs.writeFileSync(
-      file,
-      JSON.stringify({
-        profile: 'default',
-        seen: { default: new Date(NOW - 8 * DAY).toISOString() },
-      }),
-    );
-    const registry = new ProfileRegistry();
-    registry.enablePreferencePersistence(file, { env: {}, now: () => NOW });
+    fs.writeFileSync(file, JSON.stringify({ profile: 'default' }));
+    const clock = { t: NOW };
+    const registry = registryAt(file, clock);
 
     registry.register('bsd', new FakeSocket());
+    expect(registry.getPreferredProfile()).toBe('default');
+    runFor(registry, clock, 8 * DAY);
     registry.register('bb', new FakeSocket());
 
-    expect(registry.getPreferredProfile()).toBe('bsd');
-    expect(registry.getActiveProfile()).toBe('bsd');
+    expect(registry.getPreferredProfile()).toBe('bb');
+    expect(registry.getActiveProfile()).toBe('bb');
     const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
-    expect(saved.profile).toBe('bsd');
-    expect(Object.keys(saved.seen).sort()).toEqual(['bb', 'bsd', 'default']);
+    expect(saved.profile).toBe('bb');
+    expect(saved.default_absent_ms).toBe(0);
   });
 
-  test('a default seen recently keeps its place while it is away', () => {
+  test('a default that stayed connected for days keeps its place when it drops', () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    const file = tempFile();
+    const clock = { t: NOW };
+    const registry = registryAt(file, clock);
+    registry.register('A', new FakeSocket());
+    runFor(registry, clock, 10 * DAY);
+    registry.deregister('A');
+    registry.register('B', new FakeSocket());
+
+    expect(registry.getPreferredProfile()).toBe('A');
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).profile).toBe('A');
+  });
+
+  test('time with the bridge stopped counts nothing (a week away, then a restart)', () => {
     jest.spyOn(console, 'error').mockImplementation(() => {});
     const file = tempFile();
     fs.writeFileSync(
       file,
-      JSON.stringify({
-        profile: 'personal',
-        set_at: new Date(NOW - 30 * DAY).toISOString(),
-        seen: { personal: new Date(NOW - DAY).toISOString() },
-      }),
+      JSON.stringify({ profile: 'A', set_at: new Date(NOW - 30 * DAY).toISOString() }),
     );
-    const registry = new ProfileRegistry();
-    registry.enablePreferencePersistence(file, { env: {}, now: () => NOW });
+    const clock = { t: NOW + 10 * DAY };
+    const registry = registryAt(file, clock);
+    registry.register('B', new FakeSocket());
+    clock.t += 3 * HOUR; // a sleeping laptop: one gap, no ticks
+    registry.register('C', new FakeSocket());
 
-    registry.register('work', new FakeSocket());
-
-    expect(registry.getPreferredProfile()).toBe('personal');
-    expect(JSON.parse(fs.readFileSync(file, 'utf8')).profile).toBe('personal');
+    expect(registry.getPreferredProfile()).toBe('A');
   });
 
-  test('an old file: set_at stands in for last seen, no date at all starts the clock now', () => {
+  test('the absence survives a restart', () => {
     jest.spyOn(console, 'error').mockImplementation(() => {});
-    const recent = tempFile();
-    fs.writeFileSync(
-      recent,
-      JSON.stringify({ profile: 'personal', set_at: new Date(NOW - DAY).toISOString() }),
-    );
-    const r1 = new ProfileRegistry();
-    r1.enablePreferencePersistence(recent, { env: {}, now: () => NOW });
-    r1.register('work', new FakeSocket());
-    expect(r1.getPreferredProfile()).toBe('personal');
+    const file = tempFile();
+    const clock = { t: NOW };
+    const first = registryAt(file, clock);
+    first.register('A', new FakeSocket());
+    first.deregister('A');
+    runFor(first, clock, 5 * DAY);
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).default_absent_ms).toBe(5 * DAY);
 
-    fs.writeFileSync(recent, JSON.stringify({ profile: 'default' }));
-    let clock = NOW;
-    const r2 = new ProfileRegistry();
-    r2.enablePreferencePersistence(recent, { env: {}, now: () => clock });
-    r2.register('bsd', new FakeSocket());
-    expect(r2.getPreferredProfile()).toBe('default');
-    clock = NOW + 8 * DAY;
-    r2.register('bb', new FakeSocket());
-    expect(r2.getPreferredProfile()).toBe('bb');
+    const second = registryAt(file, clock);
+    second.register('B', new FakeSocket());
+    expect(second.getPreferredProfile()).toBe('A');
+    runFor(second, clock, 3 * DAY);
+    second.register('C', new FakeSocket());
+    expect(second.getPreferredProfile()).toBe('C');
   });
 
   test('MOKUTAB_DEFAULT_PROFILE pins the default over the file and a switch', () => {
     jest.spyOn(console, 'error').mockImplementation(() => {});
     const file = tempFile();
     fs.writeFileSync(file, JSON.stringify({ profile: 'bb', set_at: new Date(NOW).toISOString() }));
-    const registry = new ProfileRegistry();
-    registry.enablePreferencePersistence(file, {
-      env: { MOKUTAB_DEFAULT_PROFILE: 'bsd' },
-      now: () => NOW,
-    });
+    const clock = { t: NOW };
+    const registry = registryAt(file, clock, { MOKUTAB_DEFAULT_PROFILE: 'bsd' });
 
     registry.register('bb', new FakeSocket());
     expect(registry.getActiveProfile()).toBe('bb');
     registry.register('bsd', new FakeSocket());
+    registry.register('pf', new FakeSocket());
     expect(registry.getActiveProfile()).toBe('bsd');
 
-    expect(registry.switchProfile('bb')).toBe(true);
-    expect(registry.getActiveProfile()).toBe('bb');
+    expect(registry.switchProfile('pf')).toBe(true);
+    expect(registry.getActiveProfile()).toBe('pf');
     expect(registry.getPreferredProfile()).toBe('bsd');
-    // The file keeps the unpinned choice, so dropping the pin brings it back.
-    expect(JSON.parse(fs.readFileSync(file, 'utf8')).profile).toBe('bb');
+    // Under a pin a switch is still remembered as the unpinned default:
+    // dropping the pin brings back the last switch.
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).profile).toBe('pf');
+    // A pinned default is never "away".
+    runFor(registry, clock, 8 * DAY);
+    registry.deregister('bsd');
+    registry.register('x', new FakeSocket());
+    expect(registry.getPreferredProfile()).toBe('bsd');
+  });
+
+  test('the file keeps a shape older bridges read: profile is a string or null', () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    const file = tempFile();
+    const clock = { t: NOW };
+    const pinned = registryAt(file, clock, { MOKUTAB_DEFAULT_PROFILE: 'bsd' });
+    pinned.register('bsd', new FakeSocket());
+    const saved = fs.existsSync(file)
+      ? JSON.parse(fs.readFileSync(file, 'utf8'))
+      : { profile: null };
+    expect(saved.profile === null || typeof saved.profile === 'string').toBe(true);
+
+    const plain = registryAt(tempFile(), clock);
+    plain.register('bsd', new FakeSocket());
+    const savedPlain = JSON.parse(fs.readFileSync(path.join(dir, 'default-profile.json'), 'utf8'));
+    expect(savedPlain.profile).toBe('bsd');
+    expect(typeof savedPlain.set_at).toBe('string');
   });
 });

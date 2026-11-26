@@ -12,11 +12,15 @@ import { readEnv } from '../env';
 /** Pins the default profile; beats default-profile.json and chrome_switch_profile. */
 export const DEFAULT_PROFILE_ENV = 'MOKUTAB_DEFAULT_PROFILE';
 /**
- * A remembered default that has not connected for this long is taken for gone
- * (a renamed or deleted profile), and the profile that connects instead
- * becomes the default.
+ * A remembered default that has been away for this much bridge running time
+ * (not wall-clock time: a week with the machine off counts nothing) is taken
+ * for gone, a renamed or deleted profile, and the profile that connects
+ * instead becomes the default.
  */
 export const STALE_DEFAULT_MS = 7 * 24 * 60 * 60 * 1000;
+const HEARTBEAT_MS = 60 * 60 * 1000;
+/** A longer gap between ticks is a stopped bridge or a sleeping machine. */
+const TICK_GAP_MS = 2 * HEARTBEAT_MS;
 
 interface PendingRequest {
   resolve: (value: any) => void;
@@ -46,8 +50,13 @@ export class ProfileRegistry {
   private pinnedProfile: string | null = null;
   /** The default without the pin (what the file keeps, so dropping the pin restores it). */
   private storedProfile: string | null = null;
-  /** When each profile last connected (epoch ms), persisted with the default. */
-  private lastSeen: Record<string, number> = {};
+  /** When the stored default was chosen (ISO), kept in the file. */
+  private storedAt: string | null = null;
+  /** Bridge running time the default has been away since it last connected (ms). */
+  private defaultAbsentMs = 0;
+  private lastTick: number | null = null;
+  private preferenceDirty = false;
+  private heartbeat: ReturnType<typeof setInterval> | null = null;
   private now: () => number = Date.now;
   private pendingRequests: Map<string, PendingRequest> = new Map();
   private defaultTimeoutMs = 120000;
@@ -111,7 +120,7 @@ export class ProfileRegistry {
    */
   public enablePreferencePersistence(
     file: string,
-    options: { env?: NodeJS.ProcessEnv; now?: () => number } = {},
+    options: { env?: NodeJS.ProcessEnv; now?: () => number; heartbeat?: boolean } = {},
   ): void {
     this.preferenceFile = file;
     if (options.now) this.now = options.now;
@@ -119,23 +128,14 @@ export class ProfileRegistry {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as {
         profile?: unknown;
         set_at?: unknown;
-        seen?: unknown;
+        default_absent_ms?: unknown;
       };
-      if (parsed.seen && typeof parsed.seen === 'object') {
-        for (const [name, at] of Object.entries(parsed.seen as Record<string, unknown>)) {
-          const ms = typeof at === 'string' ? Date.parse(at) : NaN;
-          if (Number.isFinite(ms)) this.lastSeen[name] = ms;
-        }
-      }
       if (typeof parsed.profile === 'string' && parsed.profile.trim() !== '') {
         this.storedProfile = parsed.profile;
         this.preferredProfile = parsed.profile;
-        // A file from before last-seen was recorded: the default counts as seen
-        // when it was set, or, with no date at all, now (the 7 days start here).
-        const setAt = typeof parsed.set_at === 'string' ? Date.parse(parsed.set_at) : NaN;
-        if (this.lastSeen[parsed.profile] === undefined) {
-          this.lastSeen[parsed.profile] = Number.isFinite(setAt) ? setAt : this.now();
-        }
+        if (typeof parsed.set_at === 'string') this.storedAt = parsed.set_at;
+        const absent = Number(parsed.default_absent_ms);
+        if (Number.isFinite(absent) && absent > 0) this.defaultAbsentMs = absent;
       }
     } catch {
       // No file yet, or unreadable: the first profile to connect becomes the default.
@@ -148,36 +148,84 @@ export class ProfileRegistry {
     if (this.preferredProfile && this.connections.has(this.preferredProfile)) {
       this.activeProfile = this.preferredProfile;
     }
+    if (options.heartbeat !== false) {
+      // Counts the default's absence while the bridge runs; unref'd, it never keeps the process up.
+      this.heartbeat = setInterval(() => this.flushPreference(), HEARTBEAT_MS);
+      this.heartbeat.unref?.();
+    }
   }
 
-  /** A remembered default that has not connected for STALE_DEFAULT_MS. Never a pinned one. */
+  /**
+   * Add the time since the last tick to the default's absence, when the
+   * default was away for it and the bridge was running all along (a gap over
+   * TICK_GAP_MS is a stopped bridge or a sleeping machine, and counts nothing).
+   */
+  private accountAbsence(): void {
+    const now = this.now();
+    if (this.lastTick !== null) {
+      const gap = now - this.lastTick;
+      const away =
+        !!this.preferredProfile &&
+        !this.pinnedProfile &&
+        !this.connections.has(this.preferredProfile);
+      if (away && gap > 0 && gap <= TICK_GAP_MS) {
+        this.defaultAbsentMs += gap;
+        this.preferenceDirty = true;
+      }
+    }
+    this.lastTick = now;
+  }
+
+  /** Count the absence up to now and write the file if anything changed (heartbeat, exit). */
+  public flushPreference(): void {
+    this.accountAbsence();
+    this.savePreference();
+  }
+
+  /** Stop the heartbeat (tests). */
+  public stopPreferenceHeartbeat(): void {
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = null;
+  }
+
+  /**
+   * A remembered default that has been away for STALE_DEFAULT_MS of bridge
+   * running time: a renamed or deleted profile. Never a pinned one.
+   */
   private preferredIsStale(): boolean {
     if (!this.preferredProfile || this.pinnedProfile) return false;
     if (this.connections.has(this.preferredProfile)) return false;
-    const seen = this.lastSeen[this.preferredProfile];
-    return seen === undefined || this.now() - seen > STALE_DEFAULT_MS;
+    return this.defaultAbsentMs > STALE_DEFAULT_MS;
+  }
+
+  private storeDefault(profileName: string): void {
+    if (this.storedProfile !== profileName) {
+      this.storedProfile = profileName;
+      this.storedAt = new Date(this.now()).toISOString();
+      this.defaultAbsentMs = 0;
+      this.preferenceDirty = true;
+    }
+    // A pinned default stays; a switch still moves the active profile.
+    if (!this.pinnedProfile) this.preferredProfile = profileName;
   }
 
   private setPreferredProfile(profileName: string): void {
-    this.storedProfile = profileName;
-    // A pinned default stays; the switch still moves the active profile.
-    if (!this.pinnedProfile) this.preferredProfile = profileName;
-    this.persistPreference();
+    this.storeDefault(profileName);
+    this.savePreference();
   }
 
-  private persistPreference(): void {
-    if (!this.preferenceFile) return;
+  private savePreference(): void {
+    if (!this.preferenceFile || !this.preferenceDirty) return;
+    this.preferenceDirty = false;
     try {
-      const seen: Record<string, string> = {};
-      for (const [name, at] of Object.entries(this.lastSeen))
-        seen[name] = new Date(at).toISOString();
       fs.mkdirSync(path.dirname(this.preferenceFile), { recursive: true });
       fs.writeFileSync(
         this.preferenceFile,
         JSON.stringify({
+          // Older bridges read only this key (a string, or no default).
           profile: this.storedProfile,
-          set_at: new Date(this.now()).toISOString(),
-          seen,
+          set_at: this.storedAt,
+          default_absent_ms: Math.round(this.defaultAbsentMs),
         }),
       );
     } catch (error: any) {
@@ -191,6 +239,7 @@ export class ProfileRegistry {
    * Register a new profile connection
    */
   public register(profileName: string, socket: any): void {
+    this.accountAbsence();
     // Take the slot before closing the old socket, so a close event that fires
     // synchronously already sees the new socket and leaves the profile alone.
     const existing = this.connections.get(profileName);
@@ -208,15 +257,15 @@ export class ProfileRegistry {
     this.generation += 1;
     logProfileRegistry(`[ProfileRegistry] Profile "${profileName}" connected.`);
 
-    if (this.preferredIsStale()) {
+    if (profileName === this.preferredProfile) {
+      if (this.defaultAbsentMs > 0) this.preferenceDirty = true;
+      this.defaultAbsentMs = 0;
+    } else if (this.preferredIsStale()) {
       logProfileRegistry(
-        `[ProfileRegistry] Default profile "${this.preferredProfile}" has not connected for over 7 days; "${profileName}" is the default now.`,
+        `[ProfileRegistry] Default profile "${this.preferredProfile}" has been away for ${Math.round(this.defaultAbsentMs / 86_400_000)} days of bridge running time; "${profileName}" is the default now.`,
       );
-      this.storedProfile = profileName;
-      this.preferredProfile = profileName;
+      this.storeDefault(profileName);
     }
-    this.lastSeen[profileName] = this.now();
-    this.persistPreference();
 
     if (this.preferredProfile === profileName && this.activeProfile !== profileName) {
       this.activeProfile = profileName;
@@ -227,8 +276,9 @@ export class ProfileRegistry {
       // If no active profile, or the active profile is no longer connected, set this as active
       this.activeProfile = profileName;
       logProfileRegistry(`[ProfileRegistry] Active profile automatically set to "${profileName}".`);
-      if (this.preferredProfile === null) this.setPreferredProfile(profileName);
+      if (this.preferredProfile === null) this.storeDefault(profileName);
     }
+    this.savePreference();
 
     // Set up message handling for this socket
     socket.on('message', (rawData: any) => {
@@ -283,6 +333,8 @@ export class ProfileRegistry {
    * Deregister a profile connection
    */
   public deregister(profileName: string): void {
+    this.accountAbsence();
+    this.savePreference();
     if (this.connections.has(profileName)) {
       this.connections.delete(profileName);
       this.connectionSerials.delete(profileName);
