@@ -48,6 +48,12 @@ export interface ExtensionModule {
    * tool result. Refused while the module is off.
    */
   bridgeRequests?: Readonly<Record<string, (payload: any) => Promise<unknown>>>;
+  /**
+   * Called once when the service worker starts, before any await: the place to
+   * register browser event listeners this module needs (MV3 drops listeners
+   * added later). The module checks its own switch before acting on an event.
+   */
+  start?(): void;
 }
 
 let cache: ModuleStates | null = null;

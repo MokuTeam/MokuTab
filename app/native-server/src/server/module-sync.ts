@@ -37,7 +37,7 @@ export function modulesState(
 export interface ModuleSyncDeps {
   registry?: ProfileRegistry;
   switches?: ModuleSwitch;
-  modules?: readonly Pick<BridgeModule, 'id' | 'title'>[];
+  modules?: readonly Pick<BridgeModule, 'id' | 'title' | 'extensionRequests'>[];
 }
 
 /** Wire the switch to the extension connection. Returns an undo for tests. */
@@ -60,6 +60,16 @@ export function installModuleSync(deps: ModuleSyncDeps = {}): () => void {
     switches.set(id, enabled);
     return state();
   });
+  // Requests a module takes from the extension on its own (NetSuite transparent
+  // mode), refused while that module is off.
+  for (const module of modules) {
+    for (const [type, handler] of Object.entries(module.extensionRequests ?? {})) {
+      registry.setRequestHandler(type, (payload: any, profile: string) => {
+        if (!switches.isEnabled(module.id)) throw new Error(`the ${module.title} module is off`);
+        return handler(payload, profile);
+      });
+    }
+  }
   const offRegister = registry.onRegister((profile) => {
     registry.notify(profile, NativeMessageType.MODULES_STATE, state());
   });

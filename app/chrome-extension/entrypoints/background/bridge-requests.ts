@@ -38,7 +38,12 @@ export class BridgeRequests {
   }
 
   /** Send `{type, requestId, payload}` and wait for the answer's data. */
-  request(socket: BridgeSocket | null, type: string, payload?: unknown): Promise<any> {
+  request(
+    socket: BridgeSocket | null,
+    type: string,
+    payload?: unknown,
+    timeoutMs: number = this.timeoutMs,
+  ): Promise<any> {
     if (!socket || socket.readyState !== SOCKET_OPEN) {
       return Promise.reject(new Error('not connected to the bridge'));
     }
@@ -47,7 +52,7 @@ export class BridgeRequests {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         reject(new Error('the bridge did not answer (a bridge older than the module switch?)'));
-      }, this.timeoutMs);
+      }, timeoutMs);
       this.pending.set(requestId, { resolve, reject, timer });
       try {
         socket.send(JSON.stringify({ type, requestId, payload }));

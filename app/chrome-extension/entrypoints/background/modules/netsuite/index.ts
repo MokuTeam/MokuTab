@@ -1,7 +1,8 @@
 /**
  * The NetSuite module, extension side: no tools of its own (the
  * netsuite_session_* tools run in the bridge), only the typed bridge requests
- * that read and write one account host's session cookies.
+ * that read and write one account host's session cookies, and the transparent
+ * mode watcher (transparent.ts) that reports hosts to the bridge.
  */
 
 import {
@@ -11,6 +12,7 @@ import {
 } from '@mokuhub/mokutab-shared';
 import type { ExtensionModule } from '../../extension-module';
 import { nsTabIdentity, probeNsSession, readNsCookies, writeNsCookies } from './cookies';
+import { startNsTransparent } from './transparent';
 
 const DESCRIPTION_KEY = 'moduleDescription_netsuite';
 const DESCRIPTION = 'NetSuite sessions shared between machines through the session store.';
@@ -34,4 +36,6 @@ export const netsuiteExtensionModule: ExtensionModule = {
     [NativeMessageType.NS_TAB_IDENTITY]: nsTabIdentity,
     [NativeMessageType.NS_SESSION_PROBE]: probeNsSession,
   },
+  // Transparent mode: the listeners exist always and act only while the module is on.
+  start: startNsTransparent,
 };

@@ -1,6 +1,6 @@
 /**
- * The NetSuite module, bridge side: the session store client tools (phase 1
- * of the NetSuite session store; transparent mode comes later).
+ * The NetSuite module, bridge side: the session store client tools, and the
+ * transparent mode the extension drives on its own (transparent.ts).
  *
  * Cookie values move only between this process and the extension through
  * typed messages (ns_cookies_read / ns_cookies_write / ns_tab_identity), never
@@ -15,7 +15,9 @@ import { profileRegistry } from '../../server/profile-registry';
 import { ExpectedUsers } from './expected-users';
 import { NsSessionTools, type NsCookie, type NsDeps, type TabIdentity } from './session-tools';
 import { NsStoreClient } from './store-client';
+import { NsTransparent } from './transparent';
 import { serverVersion } from '../../mcp/server-identity';
+import { moduleSwitch } from '../../mcp/module-switch';
 
 const OWNED = new Set(NETSUITE_MODULE.tools.map((tool) => tool.name));
 
@@ -77,6 +79,18 @@ function liveTools(): NsSessionTools {
   return toolsInstance;
 }
 
+let transparentInstance: NsTransparent | null = null;
+
+function transparent(): NsTransparent {
+  if (!transparentInstance) {
+    transparentInstance = new NsTransparent(liveTools(), {
+      isOn: () => moduleSwitch.isEnabled(NETSUITE_MODULE.id),
+      now: () => Date.now(),
+    });
+  }
+  return transparentInstance;
+}
+
 export const netsuiteModule: BridgeModule = {
   id: NETSUITE_MODULE.id,
   title: NETSUITE_MODULE.title,
@@ -89,5 +103,16 @@ export const netsuiteModule: BridgeModule = {
   handle(name, args, ctx) {
     if (!OWNED.has(name)) return undefined;
     return liveTools().call(name, args, ctx.profile);
+  },
+  // Transparent mode: the extension reports a host, the bridge acts.
+  extensionRequests: {
+    [NativeMessageType.NS_SESSION_CHANGED]: (payload, profile) =>
+      transparent().onChanged(payload, profile),
+    [NativeMessageType.NS_LOGIN_LANDING]: (payload, profile) =>
+      transparent().onLanding(payload, profile),
+    [NativeMessageType.NS_ACTIVITY]: (payload, profile) =>
+      transparent().onActivity(payload, profile),
+    [NativeMessageType.NS_SESSION_ENDING]: (payload, profile) =>
+      transparent().onEnding(payload, profile),
   },
 };

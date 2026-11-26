@@ -183,4 +183,6 @@ export const STORAGE_KEYS = {
   PROFILE_NAME: 'profileName',
   /** The bridge's module switch, as last pushed (see common/module-state.ts). */
   MODULES_STATE: 'modulesState',
+  /** NetSuite transparent mode in this profile: off only when set to false. */
+  NS_TRANSPARENT: 'nsTransparent',
 } as const;

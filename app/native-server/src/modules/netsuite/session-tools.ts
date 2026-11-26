@@ -24,6 +24,9 @@ export const LOCK_POLL_MS = 3_000;
 export const MAX_LOCK_WAIT_MS = 110_000;
 /** A checked vault username is reused this long (names only, never a password). */
 export const VAULT_USER_TTL_MS = 10 * 60 * 1000;
+/** A transparent publish waits this long for an open tab to tell the user, polling every 3 s. */
+export const IDENTITY_WAIT_MS = 30_000;
+export const IDENTITY_POLL_MS = 3_000;
 
 function uriHost(uri: string): string | null {
   try {
@@ -183,6 +186,9 @@ export class NsSessionTools {
     return made;
   }
 
+  /** Per profile and host: the fp last published without a user (filled in by completeUser). */
+  private readonly userless = new Map<string, string>();
+
   /** Checked vault usernames by item and host, with when they were read. */
   private readonly vaultUsers = new Map<string, { user: string | null; at: number }>();
 
@@ -220,7 +226,7 @@ export class NsSessionTools {
     if (early) return early;
     switch (name) {
       case T.STATUS:
-        return this.status(account);
+        return this.status(account, this.softProfile(profile));
       case T.ENSURE:
         return this.ensure(account!, args, this.profile(profile), secrets);
       case T.PUBLISH:
@@ -257,6 +263,13 @@ export class NsSessionTools {
       'ProfileRequired',
       `${connected.length} Chrome profiles are connected (${connected.join(', ')}): pass profile`,
     );
+  }
+
+  /** The profile for a read that does not need one: named, pinned or the only connected. */
+  private softProfile(profile: string | null): string | null {
+    if (profile) return profile;
+    const connected = this.deps.connectedProfiles();
+    return connected.length === 1 ? connected[0] : null;
   }
 
   /**
@@ -321,7 +334,7 @@ export class NsSessionTools {
     return holder?.machine === this.deps.machine && holder?.profile === profile;
   }
 
-  async status(account: NsAccount | null): Promise<Json> {
+  async status(account: NsAccount | null, profile: string | null = null): Promise<Json> {
     const answer = await this.deps.store.request('GET', '/list', {
       query: { account: account?.account },
     });
@@ -332,7 +345,170 @@ export class NsSessionTools {
     }
     const listed = bodyOf(answer)?.entries;
     const entries = Array.isArray(listed) ? listed.map(metadataOnly) : [];
-    return { state: 'ok', ...(account ? { account: account.account } : {}), entries };
+    // Which user this profile takes for each account (names only): the
+    // transparent import follows it, so it is shown, never silent.
+    const expected = profile ? this.deps.users.all(profile) : null;
+    return {
+      state: 'ok',
+      ...(account ? { account: account.account } : {}),
+      entries,
+      ...(profile && expected
+        ? {
+            profile,
+            expected_users: account
+              ? Object.fromEntries(
+                  Object.entries(expected).filter(([acct]) => acct === account.account),
+                )
+              : expected,
+          }
+        : {}),
+    };
+  }
+
+  // Transparent mode (the extension reports a host; values never leave this
+  // process except to the store and back to the extension).
+
+  /** Whether the store can be used now (token present, not backing off). */
+  storeReady(): boolean {
+    return noStoreResult(this.deps.store.precheck()) === null;
+  }
+
+  /** The profile's session changed: publish it; login_at only right after a login. */
+  async publishChanged(account: NsAccount, profile: string, afterLogin: boolean): Promise<Json> {
+    const secrets: string[] = [];
+    try {
+      return await this.publish(
+        account,
+        { login_at: afterLogin, transparent: true },
+        profile,
+        secrets,
+      );
+    } catch (err: any) {
+      return {
+        state: 'error',
+        code: err instanceof ToolRefusal ? err.code : 'NetSuiteSessionError',
+      };
+    }
+  }
+
+  /** Ensure for the profile's expected user (or the only live one): what a login landing runs. */
+  async ensureExpected(account: NsAccount, profile: string): Promise<Json> {
+    const secrets: string[] = [];
+    const remembered = this.deps.users.get(profile, account.account);
+    try {
+      return await this.ensureOnce(
+        account,
+        { user: remembered, source: remembered ? 'remembered' : null },
+        profile,
+        secrets,
+      );
+    } catch (err: any) {
+      return {
+        state: 'error',
+        code: err instanceof ToolRefusal ? err.code : 'NetSuiteSessionError',
+      };
+    }
+  }
+
+  /**
+   * The profile's session was published without a user (no open tab then).
+   * Once a tab tells the user, publish the same session again: the store
+   * merges the user into the entry, so other machines can find it by user and
+   * this profile remembers it. True when it published.
+   */
+  async completeUser(account: NsAccount, profile: string): Promise<boolean> {
+    const key = `${profile}|${account.host}`;
+    const pending = this.userless.get(key);
+    if (!pending) return false;
+    const fp = await this.localFingerprint(account, profile).catch(() => null);
+    if (fp !== pending) {
+      this.userless.delete(key);
+      return false;
+    }
+    const identity = await this.deps.tabIdentity(profile, account.host).catch(() => null);
+    if (!identity?.user) return false;
+    const result = await this.publishChanged(account, profile, false);
+    return result.state === 'published' || result.state === 'unchanged';
+  }
+
+  /** Whether the profile's session for the host is logged in (alive, dead or unknown). */
+  async probe(account: NsAccount, profile: string): Promise<'alive' | 'dead' | 'unknown'> {
+    try {
+      return await this.deps.sessionState(profile, account.host);
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  /** The user this profile remembers for the account, or null. */
+  expectedUser(profile: string, account: NsAccount): string | null {
+    return this.deps.users.get(profile, account.account);
+  }
+
+  /**
+   * Whether the store has a live (or dying) entry for this account and user
+   * that another machine or profile published: then a session this profile
+   * has but the store does not know must not replace it (two live sessions
+   * would take turns). With user null, any live entry of the account counts.
+   */
+  async liveElsewhere(account: NsAccount, profile: string): Promise<boolean> {
+    const identity = await this.deps.tabIdentity(profile, account.host).catch(() => null);
+    const user = identity?.user ? identity.user.trim().toLowerCase() : null;
+    const answer = await this.deps.store.request('GET', '/list', {
+      query: { account: account.account },
+      profile,
+    });
+    const listed = bodyOf(answer)?.entries;
+    const entries: Json[] = Array.isArray(listed) ? listed : [];
+    return entries.some(
+      (e) =>
+        (e?.state === 'live' || e?.state === 'dying') &&
+        (!user || !e.user || e.user === user) &&
+        !(e?.origin?.machine === this.deps.machine && e?.origin?.profile === profile),
+    );
+  }
+
+  /** The fingerprint of the profile's session cookie for the account, or null. */
+  async localFingerprint(account: NsAccount, profile: string): Promise<string | null> {
+    const cookies = await this.deps.readCookies(profile, account.host);
+    const session = sessionCookie(cookies, account.host);
+    return session && typeof session.value === 'string' ? fingerprint(session.value) : null;
+  }
+
+  /** POST /dead for a fingerprint; true when the store matched it. */
+  async reportDead(
+    account: NsAccount,
+    fp: string,
+    reason: 'login_redirect' | 'import_bounced' | 'switch' | 'logout' | 'expired',
+    profile: string,
+  ): Promise<boolean> {
+    const answer = await this.deps.store.request('POST', '/dead', {
+      body: {
+        account: account.account,
+        fp,
+        reason,
+        where: { machine: this.deps.machine, profile },
+      },
+      profile,
+    });
+    return answer.kind === 'ok' && bodyOf(answer)?.matched === true;
+  }
+
+  /** POST /touch for the profile's session: matched true/false, or null without a session. */
+  async touch(account: NsAccount, profile: string): Promise<boolean | null> {
+    const fp = await this.localFingerprint(account, profile);
+    if (!fp) return null;
+    const answer = await this.deps.store.request('POST', '/touch', {
+      body: {
+        account: account.account,
+        fp,
+        where: { machine: this.deps.machine, profile },
+        at: this.deps.now(),
+      },
+      profile,
+    });
+    if (answer.kind !== 'ok') return null;
+    return bodyOf(answer)?.matched === true;
   }
 
   async ensure(account: NsAccount, args: Json, profile: string, secrets: string[]): Promise<Json> {
@@ -515,7 +691,16 @@ export class NsSessionTools {
       };
     }
     // The tab's user first; with a vault item too, both must be the same user.
-    const identity = await this.deps.tabIdentity(profile, account.host).catch(() => null);
+    let identity = await this.deps.tabIdentity(profile, account.host).catch(() => null);
+    if (args.transparent === true) {
+      // A tab right after a login may still be loading: wait for it a while
+      // rather than store a session without its user.
+      for (let waited = 0; !identity?.user && waited < IDENTITY_WAIT_MS; ) {
+        await this.deps.sleep(IDENTITY_POLL_MS);
+        waited += IDENTITY_POLL_MS;
+        identity = await this.deps.tabIdentity(profile, account.host).catch(() => null);
+      }
+    }
     const tabUser = identity?.user ? identity.user.trim().toLowerCase() : null;
     const fromVault = await this.vaultUser(args.vault_item, account);
     if (tabUser && fromVault && tabUser !== fromVault) {
@@ -526,7 +711,11 @@ export class NsSessionTools {
     }
     let who: Who;
     if (tabUser) who = { user: tabUser, source: 'tab' };
-    else if (fromVault) who = { user: fromVault, source: 'vault' };
+    else if (args.transparent === true) {
+      // Reported by the extension, not asked for: without an open tab the user
+      // is not known, and a remembered user may be someone else's session.
+      who = { user: null, source: null };
+    } else if (fromVault) who = { user: fromVault, source: 'vault' };
     else if (typeof args.user === 'string' && args.user.trim()) {
       who = { user: args.user.trim().toLowerCase(), source: 'args' };
     } else {
@@ -571,6 +760,10 @@ export class NsSessionTools {
       throw new ToolRefusal(answer.code, `the store refused the publish (${answer.status})`);
     }
     if (who.user) this.deps.users.set(profile, account.account, who.user);
+    // A session stored without its user is filled in later (completeUser).
+    const key = `${profile}|${account.host}`;
+    if (who.user) this.userless.delete(key);
+    else this.userless.set(key, fp);
     return {
       state: bodyOf(answer)?.stored === false ? 'unchanged' : 'published',
       account: account.account,

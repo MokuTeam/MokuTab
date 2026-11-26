@@ -4,6 +4,14 @@ All notable changes to MokuTab, called WorkatoMCP before 2.0. Versions refer to 
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. Dates are the commit dates of the corresponding release.
 
+## Unreleased
+
+### Added
+
+- **NetSuite session store, transparent mode.** While the `netsuite` module is on, the extension reports, by host only, a new session cookie, a landing on the login page (tab or XHR), activity and a logout. The bridge publishes the new session (user from the open tab only, waiting up to 30 s for one and filling it in later otherwise; `login_at` only right after a login); on a landing it checks the profile's own session and replaces only a dead or missing one with the store's live session, then sends the tab on to its target (only for a profile that took the account once explicitly; one import per host per minute; a bounce is reported `import_bounced`); it touches the store at most every 2 minutes and reports a logout. Role and account switches report nothing. A profile can turn it off (`nsTransparent: false` in the extension storage).
+- **`netsuite_session_status` names the users the profile expects** (`expected_users`).
+- Modules can answer requests the extension sends on its own (`extensionRequests`); they are refused while the module is off.
+
 ## bridge 2.2.1 · shared 2.2.1 (2026-11-26)
 
 ### Fixed
