@@ -13,6 +13,7 @@ import {
 import type { ExtensionModule } from '../../extension-module';
 import { nsTabIdentity, probeNsSession, readNsCookies, writeNsCookies } from './cookies';
 import { startNsTransparent } from './transparent';
+import { startNsPopup } from './popup-requests';
 
 const DESCRIPTION_KEY = 'moduleDescription_netsuite';
 const DESCRIPTION = 'NetSuite sessions shared between machines through the session store.';
@@ -36,6 +37,10 @@ export const netsuiteExtensionModule: ExtensionModule = {
     [NativeMessageType.NS_TAB_IDENTITY]: nsTabIdentity,
     [NativeMessageType.NS_SESSION_PROBE]: probeNsSession,
   },
-  // Transparent mode: the listeners exist always and act only while the module is on.
-  start: startNsTransparent,
+  // Transparent mode and the popup's sessions section: the listeners exist
+  // always and act only while the module is on.
+  start: () => {
+    startNsTransparent();
+    startNsPopup();
+  },
 };
