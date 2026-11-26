@@ -371,7 +371,12 @@ export class NsSessionTools {
   async publishChanged(account: NsAccount, profile: string, afterLogin: boolean): Promise<Json> {
     const secrets: string[] = [];
     try {
-      return await this.publish(account, { login_at: afterLogin }, profile, secrets);
+      return await this.publish(
+        account,
+        { login_at: afterLogin, transparent: true },
+        profile,
+        secrets,
+      );
     } catch (err: any) {
       return {
         state: 'error',
@@ -397,6 +402,43 @@ export class NsSessionTools {
         code: err instanceof ToolRefusal ? err.code : 'NetSuiteSessionError',
       };
     }
+  }
+
+  /** Whether the profile's session for the host is logged in (alive, dead or unknown). */
+  async probe(account: NsAccount, profile: string): Promise<'alive' | 'dead' | 'unknown'> {
+    try {
+      return await this.deps.sessionState(profile, account.host);
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  /** The user this profile remembers for the account, or null. */
+  expectedUser(profile: string, account: NsAccount): string | null {
+    return this.deps.users.get(profile, account.account);
+  }
+
+  /**
+   * Whether the store has a live (or dying) entry for this account and user
+   * that another machine or profile published: then a session this profile
+   * has but the store does not know must not replace it (two live sessions
+   * would take turns). With user null, any live entry of the account counts.
+   */
+  async liveElsewhere(account: NsAccount, profile: string): Promise<boolean> {
+    const identity = await this.deps.tabIdentity(profile, account.host).catch(() => null);
+    const user = identity?.user ? identity.user.trim().toLowerCase() : null;
+    const answer = await this.deps.store.request('GET', '/list', {
+      query: { account: account.account },
+      profile,
+    });
+    const listed = bodyOf(answer)?.entries;
+    const entries: Json[] = Array.isArray(listed) ? listed : [];
+    return entries.some(
+      (e) =>
+        (e?.state === 'live' || e?.state === 'dying') &&
+        (!user || !e.user || e.user === user) &&
+        !(e?.origin?.machine === this.deps.machine && e?.origin?.profile === profile),
+    );
   }
 
   /** The fingerprint of the profile's session cookie for the account, or null. */
@@ -633,7 +675,11 @@ export class NsSessionTools {
     }
     let who: Who;
     if (tabUser) who = { user: tabUser, source: 'tab' };
-    else if (fromVault) who = { user: fromVault, source: 'vault' };
+    else if (args.transparent === true) {
+      // Reported by the extension, not asked for: without an open tab the user
+      // is not known, and a remembered user may be someone else's session.
+      who = { user: null, source: null };
+    } else if (fromVault) who = { user: fromVault, source: 'vault' };
     else if (typeof args.user === 'string' && args.user.trim()) {
       who = { user: args.user.trim().toLowerCase(), source: 'args' };
     } else {

@@ -1,9 +1,15 @@
 /**
  * NetSuite session store, transparent mode, bridge side: what the extension
  * reports on its own (a session cookie changed, a login page landed, the
- * account was used, a role or account switch or a logout started) and what
- * the bridge does about it. Every report carries a host, never a value; the
- * cookies are read and written through the phase 1 paths.
+ * account was used, a logout started) and what the bridge does about it.
+ * Every report carries a host, never a value; the cookies are read and
+ * written through the phase 1 paths.
+ *
+ * Nothing here overwrites a live session: before an import or a bounce
+ * report the profile's own session is checked, and only a dead one (or none)
+ * is replaced. A profile takes an account's session on its own only after it
+ * took that account once explicitly (netsuite_session_ensure, netsuite.login),
+ * which is when it remembers the user.
  */
 
 import { accountFromHost, type NsAccount } from './account';
@@ -56,7 +62,18 @@ export class NsTransparent {
     return account;
   }
 
-  /** ns_session_changed {host, after_login?}: publish the new session. */
+  /** A live session is already there: a tab just goes on to its target. */
+  private alreadyLive(account: NsAccount, payload: any): Json {
+    return payload?.kind === 'tab'
+      ? {
+          action: 'navigate',
+          url: targetUrl(account.host, payload?.target),
+          reason: 'already_live',
+        }
+      : { action: 'none', reason: 'already_live' };
+  }
+
+  /** ns_session_changed {host, after_login?}: publish the new session (user from the tab only). */
   async onChanged(payload: any, profile: string): Promise<Json> {
     const account = this.ready(payload);
     if ('reason' in account) return { state: 'skipped', reason: account.reason };
@@ -66,28 +83,43 @@ export class NsTransparent {
 
   /**
    * ns_login_landing {host, kind: tab|fetch, target?}: a page or a background
-   * request of the profile landed on the account's login page. Take the
-   * store's live session for the expected user; a tab then goes to its target.
-   * When the same tab lands on the login page again with the session this
-   * very guard imported, that session is reported dead (import_bounced) and
-   * the store is asked once more: a newer session may be there.
+   * request of the profile landed on the account's login page.
+   * - The profile has never taken this account: nothing (that first time is
+   *   an explicit ensure or a login).
+   * - Its own session is logged in after all (a stale page, a second tab):
+   *   no import; a tab goes on to its target.
+   * - Its session is dead or missing: take the store's live session for the
+   *   expected user; a tab goes on to its target.
+   * When the session this guard imported is found dead on a new landing, it is
+   * reported dead (import_bounced) and the store is asked once more.
    */
   async onLanding(payload: any, profile: string): Promise<Json> {
     const account = this.ready(payload);
     if ('reason' in account) return { action: 'none', reason: account.reason };
+    if (!this.tools.expectedUser(profile, account)) {
+      return { action: 'none', reason: 'no_expected_user' };
+    }
     const key = `${profile}|${account.host}`;
     const now = this.deps.now();
     const last = this.imports.get(key);
+    const local = await this.tools.localFingerprint(account, profile).catch(() => null);
     let bounced = false;
-    if (last && now - last.at < IMPORT_GUARD_MS) {
-      if (last.retried) return { action: 'none', reason: 'loop_guard' };
-      const local = await this.tools.localFingerprint(account, profile).catch(() => null);
-      if (!local || local !== last.fp) return { action: 'none', reason: 'loop_guard' };
-      await this.tools.reportDead(account, local, 'import_bounced', profile).catch(() => false);
-      bounced = true;
-      last.retried = true;
+    if (local) {
+      const state = await this.tools.probe(account, profile);
+      if (state === 'alive') return this.alreadyLive(account, payload);
+      if (state === 'unknown') return { action: 'none', reason: 'probe_unknown' };
+      // Dead. The session this guard just imported: report it, once.
+      if (last && now - last.at < IMPORT_GUARD_MS) {
+        if (last.retried || local !== last.fp) return { action: 'none', reason: 'loop_guard' };
+        await this.tools.reportDead(account, local, 'import_bounced', profile).catch(() => false);
+        bounced = true;
+        last.retried = true;
+      }
+    } else if (last && now - last.at < IMPORT_GUARD_MS) {
+      return { action: 'none', reason: 'loop_guard' };
     }
     const result = await this.tools.ensureExpected(account, profile);
+    if (result.state === 'already_live') return this.alreadyLive(account, payload);
     if (result.state !== 'imported' || (bounced && result.fp === last?.fp)) {
       return { action: 'none', reason: String(result.state ?? 'error') };
     }
@@ -108,22 +140,30 @@ export class NsTransparent {
     this.touches.set(key, now);
     const matched = await this.tools.touch(account, profile).catch(() => null);
     if (matched === false) {
-      // The store does not know this session: publish it.
+      // The store does not know this session. Publish it only when no other
+      // machine or profile holds a live one for the same user.
+      if (await this.tools.liveElsewhere(account, profile).catch(() => true)) {
+        return { state: 'skipped', reason: 'live_elsewhere' };
+      }
       const published = await this.tools.publishChanged(account, profile, false);
       return { state: 'published', publish: published.state ?? 'error' };
     }
     return { state: matched === true ? 'touched' : 'no_session' };
   }
 
-  /** ns_session_ending {host, reason: switch|logout}: the session is about to end. */
+  /**
+   * ns_session_ending {host, reason}: only a logout ends the session for every
+   * machine. A role or account switch reports nothing: the next publish
+   * replaces the entry, and another account's host stays alive.
+   */
   async onEnding(payload: any, profile: string): Promise<Json> {
     const account = this.ready(payload);
     if ('reason' in account) return { state: 'skipped', reason: account.reason };
-    const reason = payload?.reason === 'logout' ? 'logout' : 'switch';
+    if (payload?.reason !== 'logout') return { state: 'ignored', reason: 'switch' };
     const fp = await this.tools.localFingerprint(account, profile).catch(() => null);
     if (!fp) return { state: 'no_session' };
-    const matched = await this.tools.reportDead(account, fp, reason, profile).catch(() => false);
+    const matched = await this.tools.reportDead(account, fp, 'logout', profile).catch(() => false);
     this.imports.delete(`${profile}|${account.host}`);
-    return { state: matched ? 'reported' : 'not_in_store', reason };
+    return { state: matched ? 'reported' : 'not_in_store', reason: 'logout' };
   }
 }

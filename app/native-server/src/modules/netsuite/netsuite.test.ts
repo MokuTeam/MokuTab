@@ -743,22 +743,107 @@ describe('until and Test Drive ids', () => {
 
 describe('transparent mode (bridge)', () => {
   const NEW = 'JSESS-NEWER-SESSION-5555aaaa';
+  const LOGIN_COOKIE = 'LOGIN-PAGE-COOKIE-111';
+  const USER = 'support_user@example.com';
+
+  /** A store that keeps one entry per account and applies /dead (dead_fp on a republish). */
+  function statefulStore() {
+    const s = {
+      entry: null as null | {
+        user: string | null;
+        value: string;
+        generation: number;
+        origin: any;
+        live: boolean;
+      },
+      dead: new Set<string>(),
+      entries: [] as any[],
+    };
+    const routes: Parameters<typeof fakeStore>[0] = {
+      'GET /entry': () =>
+        s.entry && s.entry.live
+          ? {
+              status: 200,
+              body: entryBody({
+                user: s.entry.user,
+                generation: s.entry.generation,
+                cookies: [cookie('JSESSIONID', s.entry.value)],
+              }),
+            }
+          : { status: 404, body: { ok: false, code: 'none' } },
+      'POST /dead': (body) => {
+        const matched = !!s.entry && s.entry.live && fingerprint(s.entry.value) === body.fp;
+        if (matched) {
+          s.entry!.live = false;
+          s.dead.add(body.fp);
+        }
+        return { status: 200, body: { ok: true, matched } };
+      },
+      'POST /entry': (body) => {
+        if (s.dead.has(body.fp)) return { status: 409, body: { ok: false, code: 'dead_fp' } };
+        const value = body.cookies.find((c: any) => c.name === 'JSESSIONID').value;
+        const same = s.entry?.live && fingerprint(s.entry.value) === body.fp;
+        s.entry = {
+          user: body.user,
+          value,
+          generation: (s.entry?.generation ?? 0) + (same ? 0 : 1),
+          origin: body.origin,
+          live: true,
+        };
+        return { status: 200, body: { ok: true, stored: !same, generation: s.entry.generation } };
+      },
+      'POST /touch': (body) => ({
+        status: 200,
+        body: { ok: true, matched: !!s.entry?.live && fingerprint(s.entry.value) === body.fp },
+      }),
+      'GET /list': () => ({
+        status: 200,
+        body: {
+          ok: true,
+          entries: s.entry?.live
+            ? [
+                {
+                  account: '1234567_SB2',
+                  user: s.entry.user,
+                  state: 'live',
+                  origin: s.entry.origin,
+                  fp: fingerprint(s.entry.value),
+                },
+              ]
+            : [],
+        },
+      }),
+    };
+    return { s, routes };
+  }
+
   function setup(
-    routes: Parameters<typeof fakeStore>[0],
     browser: Partial<FakeBrowser> = {},
-    opts: { off?: boolean; tokenMissing?: boolean } = {},
+    opts: { off?: boolean; tokenMissing?: boolean; remembered?: string | null } = {},
   ) {
+    const { s, routes } = statefulStore();
     const t = toolsWith(routes, browser, { tokenMissing: opts.tokenMissing });
+    if (opts.remembered !== null) t.users.set('work', '1234567_SB2', opts.remembered ?? USER);
     let now = Date.parse('2026-11-26T15:00:00Z');
     const tr = new NsTransparent(t.tools, { isOn: () => !opts.off, now: () => now });
-    return { ...t, tr, advance: (ms: number) => (now += ms) };
+    // Another machine's live session in the store.
+    const remote = (value = SECRET, user: string | null = USER) => {
+      s.entry = {
+        user,
+        value,
+        generation: (s.entry?.generation ?? 0) + 1,
+        origin: { machine: 'server-2', profile: 'bsd' },
+        live: true,
+      };
+    };
+    return { ...t, tr, s, remote, advance: (ms: number) => (now += ms) };
   }
   const leak = (values: unknown[]) => {
     const text = JSON.stringify(values);
-    expect(text).not.toContain(SECRET);
-    expect(text).not.toContain(OTHER);
-    expect(text).not.toContain(NEW);
+    for (const v of [SECRET, OTHER, NEW, LOGIN_COOKIE]) expect(text).not.toContain(v);
   };
+  const routesOf = (calls: Array<{ method: string; route: string }>) =>
+    calls.map((c) => `${c.method} ${c.route}`);
 
   test('targetUrl keeps a plain path and refuses login pages and other hosts', () => {
     expect(targetUrl(HOST, '/app/crm/support/supportcase.nl?id=5')).toBe(
@@ -775,12 +860,21 @@ describe('transparent mode (bridge)', () => {
     }
   });
 
-  test('a tab landing imports the live session and goes to its target; a fetch landing only imports', async () => {
-    const { tr, store, browser } = setup(
-      { 'GET /entry': () => ({ status: 200, body: entryBody() }) },
-      { cookies: [cookie('JSESSIONID', 'LOGIN-PAGE-COOKIE-111')] },
-    );
-    const tab = await tr.onLanding(
+  test('a profile that never took the account imports nothing on its own', async () => {
+    const t = setup({ cookies: [] }, { remembered: null });
+    t.remote();
+    expect(await t.tr.onLanding({ host: HOST, kind: 'tab' }, 'work')).toEqual({
+      action: 'none',
+      reason: 'no_expected_user',
+    });
+    expect(t.browser.written).toEqual([]);
+    expect(t.store.calls).toEqual([]);
+  });
+
+  test('a dead or missing local session: a tab imports and goes to its target, a fetch only imports', async () => {
+    const t = setup({ cookies: [cookie('JSESSIONID', LOGIN_COOKIE)], probe: 'dead' });
+    t.remote();
+    const tab = await t.tr.onLanding(
       { host: HOST, kind: 'tab', target: '/app/center/card.nl?x=1' },
       'work',
     );
@@ -789,85 +883,93 @@ describe('transparent mode (bridge)', () => {
       url: `https://${HOST}/app/center/card.nl?x=1`,
       fp: fingerprint(SECRET),
     });
-    expect(browser.written).toHaveLength(1);
-    const other = setup(
-      { 'GET /entry': () => ({ status: 200, body: entryBody() }) },
-      { cookies: [] },
-    );
-    const fetchLanding = await other.tr.onLanding({ host: HOST, kind: 'fetch' }, 'work');
-    expect(fetchLanding).toEqual({ action: 'imported', fp: fingerprint(SECRET) });
-    leak([tab, fetchLanding, store.calls.map((c) => c.route)]);
-  });
-
-  test('loop guard: a second landing within the window is left alone', async () => {
-    const { tr, store, browser, advance } = setup(
-      { 'GET /entry': () => ({ status: 200, body: entryBody() }) },
-      { cookies: [] },
-    );
-    await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
-    browser.cookies = [cookie('JSESSIONID', 'SOMETHING-ELSE-222')];
-    const again = await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
-    expect(again).toEqual({ action: 'none', reason: 'loop_guard' });
-    expect(store.calls.filter((c) => c.route === '/entry')).toHaveLength(1);
-    advance(IMPORT_GUARD_MS + 1);
-    const later = await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
-    expect(later.action).toBe('navigate');
-  });
-
-  test('a bounce reports import_bounced, asks once more, takes a newer session, then stops', async () => {
-    let generation = 1;
-    const { tr, store } = setup(
-      {
-        'GET /entry': () => ({
-          status: 200,
-          body:
-            generation === 1
-              ? entryBody()
-              : entryBody({ generation: 5, cookies: [cookie('JSESSIONID', NEW)] }),
-        }),
-        'POST /dead': () => ({ status: 200, body: { ok: true, matched: true } }),
-      },
-      { cookies: [] },
-    );
-    const first = await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
-    expect(first.action).toBe('navigate');
-    // The imported session landed on the login page again (the cookie is still the imported one).
-    generation = 2;
-    const second = await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
-    const dead = store.calls.find((c) => c.route === '/dead');
-    expect(dead?.body).toEqual({
-      account: '1234567_SB2',
+    expect(t.browser.written).toHaveLength(1);
+    const f = setup({ cookies: [] });
+    f.remote();
+    expect(await f.tr.onLanding({ host: HOST, kind: 'fetch' }, 'work')).toEqual({
+      action: 'imported',
       fp: fingerprint(SECRET),
-      reason: 'import_bounced',
-      where: { machine: 'laptop', profile: 'work' },
     });
-    expect(second).toMatchObject({ action: 'navigate', fp: fingerprint(NEW) });
-    // A second bounce in the window: no third import.
-    const third = await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
-    expect(third).toEqual({ action: 'none', reason: 'loop_guard' });
-    leak([first, second, third, dead]);
+    leak([tab, t.store.calls.map((c) => c.route)]);
   });
 
-  test('a bounce with no newer session leaves the login page alone', async () => {
-    const { tr } = setup(
-      {
-        'GET /entry': () => ({ status: 200, body: entryBody() }),
-        'POST /dead': () => ({ status: 200, body: { ok: true, matched: true } }),
-      },
-      { cookies: [] },
+  test('a landing after a good import (second tab, stale page): probe alive, no dead report, the tab goes on', async () => {
+    const t = setup({ cookies: [], probe: 'alive' });
+    t.remote();
+    await t.tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
+    const second = await t.tr.onLanding(
+      { host: HOST, kind: 'tab', target: '/app/center/card.nl' },
+      'work',
     );
-    await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
-    const again = await tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
-    expect(again.action).toBe('none');
+    expect(second).toEqual({
+      action: 'navigate',
+      url: `https://${HOST}/app/center/card.nl`,
+      reason: 'already_live',
+    });
+    expect(routesOf(t.store.calls)).not.toContain('POST /dead');
+    expect(t.s.entry?.live).toBe(true);
+    expect(t.browser.written).toHaveLength(1);
+  });
+
+  test('a live local session is never overwritten; an unknown one is left alone', async () => {
+    const live = setup({ cookies: [cookie('JSESSIONID', LOGIN_COOKIE)], probe: 'alive' });
+    live.remote();
+    expect((await live.tr.onLanding({ host: HOST, kind: 'tab' }, 'work')).reason).toBe(
+      'already_live',
+    );
+    expect(await live.tr.onLanding({ host: HOST, kind: 'fetch' }, 'work')).toEqual({
+      action: 'none',
+      reason: 'already_live',
+    });
+    expect(live.browser.written).toEqual([]);
+    const unknown = setup({ cookies: [cookie('JSESSIONID', LOGIN_COOKIE)], probe: 'unknown' });
+    unknown.remote();
+    expect(await unknown.tr.onLanding({ host: HOST, kind: 'tab' }, 'work')).toEqual({
+      action: 'none',
+      reason: 'probe_unknown',
+    });
+    expect(unknown.browser.written).toEqual([]);
+    expect(routesOf(unknown.store.calls)).not.toContain('POST /dead');
+  });
+
+  test('a real bounce (probe dead) reports import_bounced once and takes a newer session if there is one', async () => {
+    const t = setup({ cookies: [], probe: 'alive' });
+    t.remote();
+    await t.tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
+    // The imported session is dead after all; another machine logged in meanwhile.
+    t.browser.probe = 'dead';
+    const dead = await t.tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
+    const report = t.store.calls.find((c) => c.route === '/dead');
+    expect(report?.body).toMatchObject({ fp: fingerprint(SECRET), reason: 'import_bounced' });
+    expect(t.s.dead.has(fingerprint(SECRET))).toBe(true);
+    expect(dead).toEqual({ action: 'none', reason: 'none' });
+
+    const n = setup({ cookies: [], probe: 'alive' });
+    n.remote();
+    await n.tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
+    n.browser.probe = 'dead';
+    // A newer session from another machine is in the store once the old one is reported.
+    n.remote(NEW);
+    n.s.entry!.value = NEW;
+    // the browser still has the imported (old) cookie
+    n.browser.cookies = [cookie('JSESSIONID', SECRET)];
+    const again = await n.tr.onLanding({ host: HOST, kind: 'tab' }, 'work');
+    expect(again).toMatchObject({ action: 'navigate', fp: fingerprint(NEW) });
+    n.browser.probe = 'dead';
+    expect(await n.tr.onLanding({ host: HOST, kind: 'tab' }, 'work')).toEqual({
+      action: 'none',
+      reason: 'loop_guard',
+    });
+    leak([report, again]);
   });
 
   test('module off, no store or not an account host: nothing is read or sent', async () => {
-    const off = setup({}, {}, { off: true });
+    const off = setup({}, { off: true });
     expect(await off.tr.onLanding({ host: HOST, kind: 'tab' }, 'work')).toEqual({
       action: 'none',
       reason: 'module_off',
     });
-    const none = setup({}, {}, { tokenMissing: true });
+    const none = setup({}, { tokenMissing: true });
     expect(await none.tr.onChanged({ host: HOST }, 'work')).toEqual({
       state: 'skipped',
       reason: 'no_store',
@@ -881,72 +983,76 @@ describe('transparent mode (bridge)', () => {
     expect(off.store.calls).toEqual([]);
   });
 
-  test('a changed session is published; login_at only right after a login', async () => {
-    const { tr, store } = setup(
-      { 'POST /entry': () => ({ status: 200, body: { ok: true, stored: true, generation: 2 } }) },
-      {
-        cookies: [cookie('JSESSIONID', SECRET)],
-        identity: { user: 'a@b.c', role: '3', role_id: 'x' },
-      },
+  test('a changed session: user from the tab only (null without one, never the remembered user); login_at only after a login', async () => {
+    const t = setup(
+      { cookies: [cookie('JSESSIONID', SECRET)], identity: null },
+      { remembered: 'someone.else@example.com' },
     );
-    expect(await tr.onChanged({ host: HOST }, 'work')).toEqual({ state: 'published' });
-    expect(store.calls[0].body.login_at).toBeNull();
-    await tr.onChanged({ host: HOST, after_login: true }, 'work');
-    expect(typeof store.calls[1].body.login_at).toBe('number');
+    expect(await t.tr.onChanged({ host: HOST }, 'work')).toEqual({ state: 'published' });
+    const first = t.store.calls.find((c) => c.route === '/entry')!;
+    expect(first.body.user).toBeNull();
+    expect(first.body.login_at).toBeNull();
+    t.browser.identity = { user: 'Tab.User@example.com', role: '3', role_id: 'x' };
+    t.browser.cookies = [cookie('JSESSIONID', NEW)];
+    await t.tr.onChanged({ host: HOST, after_login: true }, 'work');
+    const second = t.store.calls.filter((c) => c.route === '/entry')[1];
+    expect(second.body.user).toBe('tab.user@example.com');
+    expect(typeof second.body.login_at).toBe('number');
   });
 
-  test('activity: one touch per 2 minutes; a session the store does not know is published', async () => {
-    let matched = true;
-    const { tr, store, advance } = setup(
-      {
-        'POST /touch': () => ({ status: 200, body: { ok: true, matched } }),
-        'POST /entry': () => ({ status: 200, body: { ok: true, stored: true } }),
-      },
-      { cookies: [cookie('JSESSIONID', SECRET)] },
-    );
-    expect(await tr.onActivity({ host: HOST }, 'work')).toEqual({ state: 'touched' });
-    expect(await tr.onActivity({ host: HOST }, 'work')).toEqual({ state: 'throttled' });
-    const touch = store.calls.find((c) => c.route === '/touch');
-    expect(touch?.body).toMatchObject({
-      account: '1234567_SB2',
-      fp: fingerprint(SECRET),
-      where: { machine: 'laptop', profile: 'work' },
+  test('activity: one touch per 2 minutes; a miss publishes only when no other machine has a live entry', async () => {
+    const t = setup({
+      cookies: [cookie('JSESSIONID', SECRET)],
+      identity: { user: USER, role: '3', role_id: 'x' },
     });
-    advance(TOUCH_EVERY_MS + 1);
-    matched = false;
-    expect(await tr.onActivity({ host: HOST }, 'work')).toEqual({
+    t.remote(SECRET);
+    expect(await t.tr.onActivity({ host: HOST }, 'work')).toEqual({ state: 'touched' });
+    expect(await t.tr.onActivity({ host: HOST }, 'work')).toEqual({ state: 'throttled' });
+    t.advance(TOUCH_EVERY_MS + 1);
+    // Another machine holds a different live session for the same user: no ping-pong.
+    t.remote(NEW);
+    expect(await t.tr.onActivity({ host: HOST }, 'work')).toEqual({
+      state: 'skipped',
+      reason: 'live_elsewhere',
+    });
+    expect(routesOf(t.store.calls)).not.toContain('POST /entry');
+    // Nobody else has one: publish.
+    const alone = setup({
+      cookies: [cookie('JSESSIONID', SECRET)],
+      identity: { user: USER, role: '3', role_id: 'x' },
+    });
+    expect(await alone.tr.onActivity({ host: HOST }, 'work')).toEqual({
       state: 'published',
       publish: 'published',
     });
-    leak([touch]);
   });
 
-  test('a switch or a logout reports the local session dead with its reason', async () => {
-    const { tr, store } = setup(
-      { 'POST /dead': () => ({ status: 200, body: { ok: true, matched: true } }) },
-      { cookies: [cookie('JSESSIONID', SECRET)] },
-    );
-    expect(await tr.onEnding({ host: HOST, reason: 'switch' }, 'work')).toEqual({
-      state: 'reported',
+  test('a role or account switch leaves the live session alone; a logout reports it dead', async () => {
+    const t = setup({ cookies: [cookie('JSESSIONID', SECRET)] });
+    t.remote(SECRET);
+    expect(await t.tr.onEnding({ host: HOST, reason: 'switch' }, 'work')).toEqual({
+      state: 'ignored',
       reason: 'switch',
     });
-    expect(await tr.onEnding({ host: HOST, reason: 'logout' }, 'work')).toEqual({
+    expect(t.store.calls).toEqual([]);
+    expect(t.s.entry?.live).toBe(true);
+    expect(await t.tr.onEnding({ host: HOST, reason: 'logout' }, 'work')).toEqual({
       state: 'reported',
       reason: 'logout',
     });
-    expect(store.calls.map((c) => c.body.reason)).toEqual(['switch', 'logout']);
-    const empty = setup({}, { cookies: [] });
+    expect(t.s.entry?.live).toBe(false);
+    // The store refuses to take that session back.
+    t.browser.identity = { user: USER, role: '3', role_id: 'x' };
+    expect((await t.tr.onChanged({ host: HOST }, 'work')).state).toBe('dead_session');
+    const empty = setup({ cookies: [] });
     expect(await empty.tr.onEnding({ host: HOST, reason: 'logout' }, 'work')).toEqual({
       state: 'no_session',
     });
   });
 
   test('status names the users this profile expects', async () => {
-    const { tools, users } = setup({
-      'GET /list': () => ({ status: 200, body: { ok: true, entries: [] } }),
-    });
-    users.set('work', '1234567_SB2', 'a@b.c');
-    const out = parse(await tools.call('netsuite_session_status', {}, 'work'));
+    const t = setup({}, { remembered: 'a@b.c' });
+    const out = parse(await t.tools.call('netsuite_session_status', {}, 'work'));
     expect(out).toMatchObject({ profile: 'work', expected_users: { '1234567_SB2': 'a@b.c' } });
   });
 });
