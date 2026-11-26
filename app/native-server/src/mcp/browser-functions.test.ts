@@ -794,6 +794,10 @@ describe('bridge tools in tool steps', () => {
     );
     expect(out.status).toBe('ok');
     expect(out.result).toEqual({ state: 'logged_in', source: 'form' });
+    // The trace says the optional step failed, with why; it never reads as ok.
+    const failed = out.trace.find((t: any) => t.status === 'failed_optional');
+    expect(failed).toMatchObject({ type: 'tool' });
+    expect(String(failed.note)).toMatch(/switched off/);
   });
 
   test('without bridge tools an optional step is an error value, a required one fails the run', async () => {
