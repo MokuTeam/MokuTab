@@ -116,28 +116,6 @@ function refusal(code: string, message: string): CallToolResult {
   };
 }
 
-/** A short popup text for a store state that is not a session. */
-function storeStateText(state: unknown): string {
-  switch (state) {
-    case 'store_unconfigured':
-      return 'no session store on this machine';
-    case 'no_store':
-      return 'session store not reachable';
-    case 'none':
-      return 'no live session for this account in the store';
-    case 'already_live_unverified':
-      return "could not check this profile's session; reload the page";
-    default:
-      return `could not open the session (${String(state ?? 'error')})`;
-  }
-}
-
-/** A short popup text for a thrown error (a refusal's message carries no value). */
-function popupError(err: any): string {
-  if (err instanceof ToolRefusal) return err.message;
-  return 'could not reach the session store';
-}
-
 /** What a store answer means when it is no answer at all. */
 function noStoreResult(answer: StoreAnswer | null, account?: string): Json | null {
   if (!answer) return null;
@@ -405,68 +383,91 @@ export class NsSessionTools {
     };
   }
 
-  // The popup's NetSuite sessions section (metadata only).
+  // The popup's NetSuite sessions section (metadata only). Every failure is
+  // a short code the popup maps to its own text: store_unreachable,
+  // other_user, could_not_check, open_failed.
 
   /** The store's live and dying entries, as the popup lists them. */
   async popupList(): Promise<Json> {
     let result: Json;
     try {
       result = await this.status(null);
-    } catch (err: any) {
-      return { ok: false, error: popupError(err) };
+    } catch {
+      return { ok: false, code: 'store_unreachable' };
     }
-    if (result.state !== 'ok') return { ok: false, error: storeStateText(result.state) };
+    if (result.state !== 'ok') return { ok: false, code: 'store_unreachable' };
+    const time = (v: unknown): number | null => {
+      const ms = untilMs(v);
+      return Number.isFinite(ms) && ms > 0 ? ms : null;
+    };
     const entries = (result.entries as Json[])
       .filter((e) => e?.state === 'live' || e?.state === 'dying')
       .map((e) => ({
         account: e.account,
-        user: e.user ?? null,
+        user: typeof e.user === 'string' ? e.user : null,
         role: e.role ?? null,
         state: e.state,
-        abs_expiry: e.abs_expiry ?? null,
-        idle_expiry: e.idle_expiry ?? null,
-        last_activity: e.last_activity ?? null,
-        last_where: e.last_where ?? null,
+        abs_expiry: time(e.abs_expiry),
+        idle_expiry: time(e.idle_expiry),
+        last_activity: time(e.last_activity),
+        last_where:
+          e.last_where && typeof e.last_where === 'object'
+            ? {
+                machine: String(e.last_where.machine ?? ''),
+                profile: String(e.last_where.profile ?? ''),
+              }
+            : null,
       }));
     return { ok: true, entries };
   }
 
   /**
-   * The popup's click on an account: open it in this profile, logged in. A
-   * click is an explicit action, so the store's live user is imported even
-   * when this profile remembers nobody for the account (and remembered after).
-   * A live session of the same user is never replaced; one of another user
-   * is refused. Answers the URL the extension opens, never a value.
+   * The popup's click on an account (and user): open it in this profile,
+   * logged in. A click is an explicit action, so the store's live user is
+   * imported even when this profile remembers nobody for the account (and is
+   * remembered after). A session this profile already has is replaced only
+   * when a probe says it is logged out: alive with the same user just opens,
+   * alive with another user or an unknown user, or a probe that could not
+   * tell, changes nothing. Answers the URL the extension opens, never a value.
    */
   async popupOpen(payload: Json, profile: string): Promise<Json> {
     const account = normalizeAccount(String(payload?.account ?? ''));
-    if (!account) return { ok: false, error: 'not a NetSuite account' };
+    if (!account) return { ok: false, code: 'open_failed' };
+    const wanted =
+      typeof payload?.user === 'string' && payload.user.trim()
+        ? payload.user.trim().toLowerCase()
+        : null;
     const url = `https://${account.host}/app/center/card.nl`;
     const secrets: string[] = [];
     try {
       const listed = await this.status(account);
-      if (listed.state !== 'ok') return { ok: false, error: storeStateText(listed.state) };
+      if (listed.state !== 'ok') return { ok: false, code: 'store_unreachable' };
       const live = (listed.entries as Json[])
         .filter(
-          (e) => e?.account === account.account && (e?.state === 'live' || e?.state === 'dying'),
+          (e) =>
+            e?.account === account.account &&
+            (e?.state === 'live' || e?.state === 'dying') &&
+            (!wanted || (typeof e.user === 'string' && e.user.toLowerCase() === wanted)),
         )
-        .sort((a, b) => (untilMs(b?.last_activity) || 0) - (untilMs(a?.last_activity) || 0));
-      if (!live.length)
-        return { ok: false, error: 'no live session for this account in the store' };
+        .sort((x, y) => (untilMs(y?.last_activity) || 0) - (untilMs(x?.last_activity) || 0));
+      if (!live.length) return { ok: false, code: 'open_failed' };
       const user: string | null = typeof live[0].user === 'string' ? live[0].user : null;
-      const local = await this.localFingerprint(account, profile).catch(() => null);
+      let local: string | null;
+      try {
+        local = await this.localFingerprint(account, profile);
+      } catch {
+        return { ok: false, code: 'could_not_check' };
+      }
       if (local) {
         const state = await this.probe(account, profile);
+        if (state === 'unknown') return { ok: false, code: 'could_not_check' };
         if (state === 'alive') {
           const identity = await this.deps.tabIdentity(profile, account.host).catch(() => null);
-          const tabUser = identity?.user ? identity.user.trim().toLowerCase() : null;
-          if (tabUser && user && tabUser !== user) {
-            return {
-              ok: false,
-              error:
-                'this profile is logged in to the account as another user; log out there first',
-            };
-          }
+          const current = identity?.user
+            ? identity.user.trim().toLowerCase()
+            : this.deps.users.get(profile, account.account);
+          if (!current || !user) return { ok: false, code: 'could_not_check' };
+          if (current !== user.toLowerCase()) return { ok: false, code: 'other_user' };
           return { ok: true, url, action: 'opened' };
         }
       }
@@ -479,15 +480,13 @@ export class NsSessionTools {
       if (result.state === 'imported' || result.state === 'already_live') {
         return { ok: true, url, action: result.state };
       }
-      if (result.state === 'locked_by') {
-        return { ok: false, error: 'another machine is logging in to this account right now' };
+      if (result.state === 'store_unconfigured' || result.state === 'no_store') {
+        return { ok: false, code: 'store_unreachable' };
       }
-      if (result.state === 'partial_import') {
-        return { ok: false, error: 'Chrome refused some session cookies; log in instead' };
-      }
-      return { ok: false, error: storeStateText(result.state) };
-    } catch (err: any) {
-      return { ok: false, error: String(scrubSecrets(popupError(err), secrets)) };
+      if (result.state === 'already_live_unverified') return { ok: false, code: 'could_not_check' };
+      return { ok: false, code: 'open_failed' };
+    } catch {
+      return { ok: false, code: 'open_failed' };
     }
   }
 

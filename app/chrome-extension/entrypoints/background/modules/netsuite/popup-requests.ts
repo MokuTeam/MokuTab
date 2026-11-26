@@ -3,7 +3,10 @@
  * sessions in the store, and a click that opens one in this profile, logged
  * in. Both go to the bridge as typed requests; the import itself runs between
  * the bridge and this extension (cookies.ts). No cookie value is part of any
- * message here: the replies carry account metadata and a URL only.
+ * message here: the replies carry account metadata, a URL or a short code.
+ *
+ * Failure codes the popup maps to its own text: module_off, store_unreachable,
+ * other_user, could_not_check, open_failed.
  *
  * Message contract: entrypoints/popup/ns-sessions.ts.
  */
@@ -17,8 +20,25 @@ export const NS_POPUP_LIST_MESSAGE = 'ns_sessions_list';
 export const NS_POPUP_OPEN_MESSAGE = 'ns_session_open';
 /** The popup waits 3 s for the list; the bridge gets a little less. */
 export const LIST_TIMEOUT_MS = 2_800;
-/** An open may import a session first (probe, cookie write). */
-export const OPEN_TIMEOUT_MS = 14_000;
+/**
+ * An open may read the profile's cookies, probe its session (up to 12 s) and
+ * import the store's copy; the popup waits a little longer than this.
+ */
+export const OPEN_TIMEOUT_MS = 40_000;
+
+export type NsPopupCode =
+  | 'module_off'
+  | 'store_unreachable'
+  | 'other_user'
+  | 'could_not_check'
+  | 'open_failed';
+const CODES = new Set<string>([
+  'module_off',
+  'store_unreachable',
+  'other_user',
+  'could_not_check',
+  'open_failed',
+]);
 
 export interface NsPopupEnv {
   moduleOn(): Promise<boolean>;
@@ -28,19 +48,36 @@ export interface NsPopupEnv {
   fromOwnPage(sender: chrome.runtime.MessageSender): boolean;
 }
 
-type Reply = { ok: true; [key: string]: unknown } | { ok: false; error: string };
+type Reply = { ok: true; [key: string]: unknown } | { ok: false; code: NsPopupCode };
 
-function errorText(err: unknown, fallback: string): string {
-  const text = err instanceof Error ? err.message : String(err ?? '');
-  return text && text.length < 200 ? text : fallback;
+const fail = (code: NsPopupCode): Reply => ({ ok: false, code });
+const codeOf = (value: unknown, fallback: NsPopupCode): NsPopupCode =>
+  typeof value === 'string' && CODES.has(value) ? (value as NsPopupCode) : fallback;
+
+/** Whether a message comes from one of this extension's own pages, not a tab or another origin. */
+export function isOwnPage(
+  sender: chrome.runtime.MessageSender | undefined,
+  extensionId: string,
+  ownOrigin: string,
+): boolean {
+  return (
+    !!sender &&
+    sender.id === extensionId &&
+    !sender.tab &&
+    typeof sender.url === 'string' &&
+    sender.url.startsWith(ownOrigin)
+  );
 }
 
-/** A URL the bridge may send the popup's new tab to: https on an account host only. */
+/** The URL the popup's new tab may open: https on an account host, rebuilt from origin and path. */
 export function openableUrl(url: unknown): string | null {
   if (typeof url !== 'string') return null;
   try {
     const parsed = new URL(url);
-    return parsed.protocol === 'https:' && ACCOUNT_HOST.test(parsed.hostname) ? parsed.href : null;
+    if (parsed.protocol !== 'https:' || !ACCOUNT_HOST.test(parsed.hostname) || parsed.port) {
+      return null;
+    }
+    return parsed.origin + parsed.pathname;
   } catch {
     return null;
   }
@@ -54,31 +91,35 @@ export async function handleNsPopupMessage(
 ): Promise<Reply | null> {
   const type = message?.type;
   if (type !== NS_POPUP_LIST_MESSAGE && type !== NS_POPUP_OPEN_MESSAGE) return null;
-  if (!env.fromOwnPage(sender)) return { ok: false, error: 'not allowed' };
-  if (!(await env.moduleOn())) return { ok: false, error: 'the NetSuite module is off' };
+  if (!env.fromOwnPage(sender)) return fail('open_failed');
+  if (!(await env.moduleOn())) return fail('module_off');
   if (type === NS_POPUP_LIST_MESSAGE) {
     try {
       const data = await env.ask(NativeMessageType.NS_POPUP_LIST, {}, LIST_TIMEOUT_MS);
       if (data?.ok === true && Array.isArray(data.entries))
         return { ok: true, entries: data.entries };
-      return { ok: false, error: typeof data?.error === 'string' ? data.error : 'no answer' };
-    } catch (err) {
-      return { ok: false, error: errorText(err, 'session store not reachable') };
+      return fail(codeOf(data?.code, 'store_unreachable'));
+    } catch {
+      return fail('store_unreachable');
     }
   }
   const account = typeof message?.account === 'string' ? message.account.trim() : '';
-  if (!account) return { ok: false, error: 'no account' };
+  if (!account) return fail('open_failed');
+  const user =
+    typeof message?.user === 'string' && message.user.trim() ? message.user.trim() : null;
   try {
-    const data = await env.ask(NativeMessageType.NS_POPUP_OPEN, { account }, OPEN_TIMEOUT_MS);
-    if (data?.ok !== true) {
-      return { ok: false, error: typeof data?.error === 'string' ? data.error : 'could not open' };
-    }
+    const data = await env.ask(
+      NativeMessageType.NS_POPUP_OPEN,
+      user ? { account, user } : { account },
+      OPEN_TIMEOUT_MS,
+    );
+    if (data?.ok !== true) return fail(codeOf(data?.code, 'open_failed'));
     const url = openableUrl(data.url);
-    if (!url) return { ok: false, error: 'the bridge answered an unexpected address' };
+    if (!url) return fail('open_failed');
     const tabId = await env.openTab(url);
-    return typeof tabId === 'number' ? { ok: true, tabId } : { ok: false, error: 'no tab opened' };
-  } catch (err) {
-    return { ok: false, error: errorText(err, 'could not open the session') };
+    return typeof tabId === 'number' ? { ok: true, tabId } : fail('open_failed');
+  } catch {
+    return fail('store_unreachable');
   }
 }
 
@@ -86,11 +127,7 @@ const liveEnv: NsPopupEnv = {
   moduleOn: () => moduleExplicitlyOn('netsuite'),
   ask: (type, payload, timeoutMs) => askBridge(type, payload, timeoutMs),
   openTab: async (url) => (await chrome.tabs.create({ url, active: true })).id,
-  fromOwnPage: (sender) =>
-    sender?.id === chrome.runtime.id &&
-    !sender.tab &&
-    typeof sender.url === 'string' &&
-    sender.url.startsWith(chrome.runtime.getURL('')),
+  fromOwnPage: (sender) => isOwnPage(sender, chrome.runtime.id, chrome.runtime.getURL('')),
 };
 
 let started = false;
@@ -102,7 +139,9 @@ export function startNsPopup(env: NsPopupEnv = liveEnv): void {
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const type = message?.type;
     if (type !== NS_POPUP_LIST_MESSAGE && type !== NS_POPUP_OPEN_MESSAGE) return false;
-    void handleNsPopupMessage(message, sender, env).then((reply) => sendResponse(reply));
+    void handleNsPopupMessage(message, sender, env)
+      .catch((): Reply => fail('open_failed'))
+      .then((reply) => sendResponse(reply));
     return true;
   });
 }

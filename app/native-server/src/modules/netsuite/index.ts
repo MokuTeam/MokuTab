@@ -69,8 +69,7 @@ function liveTools(): NsSessionTools {
       },
       vaultUris: (item) => vault.uris(item),
       vaultUsername: (item) => vault.get(item, 'username'),
-      vaultHasTotp: (item) =>
-        vault.hasTotp ? vault.hasTotp(item) : Promise.reject(new Error('not supported')),
+      vaultHasTotp: (item) => vault.hasTotp(item),
       connectedProfiles: () => profileRegistry.getConnectedProfiles(),
       machine: os.hostname(),
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),

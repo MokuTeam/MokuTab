@@ -39,7 +39,7 @@ export interface FnVault {
   get(item: string, field: VaultField): Promise<string>;
   uris(item: string): Promise<VaultUri[]>;
   /** Whether the item has a TOTP secret; the secret itself is never returned or kept. */
-  hasTotp?(item: string): Promise<boolean>;
+  hasTotp(item: string): Promise<boolean>;
 }
 
 /** A vault problem the caller can act on (locked, missing item); never carries a secret. */
@@ -243,6 +243,16 @@ export function bitwardenVault(exec: Exec = execBw, hostOverride?: Partial<Vault
       `bw ${args[0]} ${args[1]} failed: ${stderr.split('\n')[0].slice(0, 200) || 'no message'}`,
     );
   };
+  /** The item as bw prints it; callers keep only what they need from it. */
+  const getItem = async (item: string): Promise<any> => {
+    assertItemId(item);
+    const raw = await run(['get', 'item', item]);
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new VaultError('bw get item did not return JSON');
+    }
+  };
   return {
     async get(item, field) {
       if (!VAULT_FIELDS.includes(field)) throw new VaultError(`unknown vault field ${field}`);
@@ -252,14 +262,7 @@ export function bitwardenVault(exec: Exec = execBw, hostOverride?: Partial<Vault
       return value;
     },
     async uris(item) {
-      assertItemId(item);
-      const raw = await run(['get', 'item', item]);
-      let parsed: any;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        throw new VaultError('bw get item did not return JSON');
-      }
+      const parsed = await getItem(item);
       const uris = Array.isArray(parsed?.login?.uris) ? parsed.login.uris : [];
       // Keep only the URIs; the rest of the item (password, notes) is dropped here.
       return uris
@@ -270,16 +273,8 @@ export function bitwardenVault(exec: Exec = execBw, hostOverride?: Partial<Vault
         }));
     },
     async hasTotp(item) {
-      assertItemId(item);
-      const raw = await run(['get', 'item', item]);
-      let parsed: any;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        throw new VaultError('bw get item did not return JSON');
-      }
       // Only whether a secret is there; the secret is dropped with the item here.
-      const totp = parsed?.login?.totp;
+      const totp = (await getItem(item))?.login?.totp;
       return typeof totp === 'string' && totp.trim() !== '';
     },
   };
